@@ -171,56 +171,43 @@ When `prDeploy.injectPREnv: true` (default), every generated App receives:
 
 ## Deploying kube-gitops with kube-deploy
 
-kube-gitops is designed to run inside the same cluster as kube-deploy,
-and the cleanest way to install it is to point kube-deploy at this repo.
+kube-gitops is designed to run inside the same cluster as kube-deploy. The entire
+installation — CRDs, namespace, RBAC, and the operator itself — is expressed as a
+single kube-deploy `App` CR. kube-deploy's `resources` field applies any raw
+Kubernetes objects alongside the deployment, so nothing needs to be pre-applied manually.
 
-### Prerequisites
+**Prerequisites:** kube-deploy running in the cluster (BuildKit + registry).
+That's it.
 
-- kube-deploy running in the cluster (with BuildKit + registry)
-- The kube-gitops CRDs applied (see below)
-- A namespace for the operator itself (e.g. `gitops`)
-
-### Step 1 — Apply the CRDs
-
-```bash
-kubectl apply -f https://raw.githubusercontent.com/centerionware/kube-gitops/main/chart/templates/crd.yaml
-```
-
-### Step 2 — Apply RBAC
+Edit the `ingress.host` (or switch to `gateway`), then apply:
 
 ```bash
-kubectl create namespace gitops
-kubectl apply -f https://raw.githubusercontent.com/centerionware/kube-gitops/main/chart/templates/rbac.yaml
+kubectl apply -f https://raw.githubusercontent.com/centerionware/kube-gitops/main/deploy.yaml
 ```
 
-### Step 3 — Launch via kube-deploy
+`deploy.yaml`:
 
 ```yaml
 apiVersion: kube-deploy.centerionware.app/v1alpha1
 kind: App
 metadata:
   name: kube-gitops
-  namespace: gitops
+  namespace: kube-deploy   # deploy into kube-deploy's own namespace — no extra ns needed
 spec:
   repo: https://github.com/centerionware/kube-gitops
-
-  # kube-gitops is a controller, not a web server — it needs no ingress.
-  # updateInterval keeps it tracking main branch for self-updates.
   updateInterval: 10m
 
   build:
     baseImage: golang:1.22-alpine
     installCmd: go mod download
     buildCmd: go build -trimpath -ldflags="-s -w" -o /app/kube-gitops ./main.go
-    # If the repo is private, reference credentials here:
-    # gitSecret: kube-gitops-git-secret
+    # gitSecret: kube-gitops-git-secret   # uncomment if repo is private
 
   run:
     command: ["/app/kube-gitops"]
-    port: 8080          # webhook listener port
+    port: 8080
     replicas: 1
     serviceAccountName: kube-gitops
-
     resources:
       cpuRequest: 50m
       memoryRequest: 64Mi
@@ -228,14 +215,13 @@ spec:
       memoryLimit: 128Mi
 
   # Expose the webhook endpoint so git platforms can reach it.
-  # Use either ingress or gateway depending on your cluster setup.
+  # Use ingress OR gateway — not both.
   ingress:
     enabled: true
-    host: gitops.example.com
+    host: gitops.example.com   # <-- change this
     className: nginx
     # tlsSecret: gitops-tls
 
-  # --- OR Gateway API ---
   # gateway:
   #   enabled: true
   #   gatewayRef:
@@ -245,16 +231,316 @@ spec:
 
   env:
     LOG_DEV_MODE: "false"
+
+  # Everything below is applied to the cluster before the operator starts.
+  # CRDs, RBAC, and the ServiceAccount are fully self-contained here —
+  # no kubectl pre-steps required.
+  resources:
+
+    # ── ServiceAccount ─────────────────────────────────────────────
+    - apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: kube-gitops
+        namespace: kube-deploy
+
+    # ── ClusterRole ────────────────────────────────────────────────
+    - apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: kube-gitops
+      rules:
+        - apiGroups: ["kube-gitops.centerionware.app"]
+          resources: ["gitrepos", "gitrepos/status", "prdeployments", "prdeployments/status"]
+          verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+        - apiGroups: ["kube-deploy.centerionware.app"]
+          resources: ["apps", "apps/status", "containerapps", "containerapps/status"]
+          verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+        - apiGroups: [""]
+          resources: ["secrets"]
+          verbs: ["get", "list", "watch"]
+        - apiGroups: [""]
+          resources: ["events"]
+          verbs: ["create", "patch"]
+        - apiGroups: ["networking.k8s.io"]
+          resources: ["ingresses"]
+          verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+        - apiGroups: ["gateway.networking.k8s.io"]
+          resources: ["httproutes"]
+          verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+    # ── ClusterRoleBinding ─────────────────────────────────────────
+    - apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: kube-gitops
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: kube-gitops
+      subjects:
+        - kind: ServiceAccount
+          name: kube-gitops
+          namespace: kube-deploy
+
+    # ── GitRepo CRD ────────────────────────────────────────────────
+    - apiVersion: apiextensions.k8s.io/v1
+      kind: CustomResourceDefinition
+      metadata:
+        name: gitrepos.kube-gitops.centerionware.app
+      spec:
+        group: kube-gitops.centerionware.app
+        scope: Namespaced
+        names:
+          plural: gitrepos
+          singular: gitrepo
+          kind: GitRepo
+          shortNames: ["gr"]
+        versions:
+          - name: v1alpha1
+            served: true
+            storage: true
+            subresources:
+              status: {}
+            additionalPrinterColumns:
+              - name: Platform
+                type: string
+                jsonPath: .spec.platform
+              - name: Mode
+                type: string
+                jsonPath: .spec.trigger.mode
+              - name: Phase
+                type: string
+                jsonPath: .status.phase
+              - name: ActivePRs
+                type: integer
+                jsonPath: .status.activePrDeployments
+              - name: Age
+                type: date
+                jsonPath: .metadata.creationTimestamp
+            schema:
+              openAPIV3Schema:
+                type: object
+                properties:
+                  spec:
+                    type: object
+                    required: ["platform", "repo", "gitSecret", "trigger"]
+                    properties:
+                      platform:
+                        type: string
+                        enum: ["github", "gitlab", "gitea", "forgejo"]
+                      repo:
+                        type: string
+                      gitSecret:
+                        type: string
+                      trigger:
+                        type: object
+                        required: ["mode"]
+                        properties:
+                          mode:
+                            type: string
+                            enum: ["webhook", "poll"]
+                          pollInterval:
+                            type: string
+                            default: "2m"
+                          webhookSecret:
+                            type: string
+                          webhookPath:
+                            type: string
+                      prPolicy:
+                        type: object
+                        properties:
+                          allowedAuthorAssociations:
+                            type: array
+                            items:
+                              type: string
+                            default: ["OWNER", "MEMBER", "COLLABORATOR"]
+                          requireLabel:
+                            type: string
+                          allowCommentTrigger:
+                            type: boolean
+                            default: false
+                          commentTriggerPhrase:
+                            type: string
+                            default: "/deploy"
+                          allowedCommenters:
+                            type: array
+                            items:
+                              type: string
+                      prDeploy:
+                        type: object
+                        properties:
+                          namespace:
+                            type: string
+                          nameTemplate:
+                            type: string
+                            default: "{{.RepoName}}-pr-{{.PRNumber}}"
+                          ingressHostTemplate:
+                            type: string
+                            default: "pr-{{.PRNumber}}.{{.RepoName}}.{{.BaseDomain}}"
+                          baseDomain:
+                            type: string
+                          injectPREnv:
+                            type: boolean
+                            default: true
+                          build:
+                            type: object
+                            properties:
+                              baseImage:
+                                type: string
+                              installCmd:
+                                type: string
+                              buildCmd:
+                                type: string
+                              dockerfileMode:
+                                type: string
+                                enum: ["auto", "generate", "inline"]
+                              dockerfile:
+                                type: string
+                              output:
+                                type: string
+                              registry:
+                                type: string
+                          run:
+                            type: object
+                            properties:
+                              command:
+                                type: array
+                                items:
+                                  type: string
+                              port:
+                                type: integer
+                              replicas:
+                                type: integer
+                                default: 1
+                              registry:
+                                type: string
+                          ingress:
+                            type: object
+                            properties:
+                              enabled:
+                                type: boolean
+                                default: true
+                              className:
+                                type: string
+                              tlsSecret:
+                                type: string
+                              annotations:
+                                type: object
+                                additionalProperties:
+                                  type: string
+                          gateway:
+                            type: object
+                            properties:
+                              enabled:
+                                type: boolean
+                                default: false
+                              gatewayRef:
+                                type: object
+                                required: ["name"]
+                                properties:
+                                  name:
+                                    type: string
+                                  namespace:
+                                    type: string
+                                  sectionName:
+                                    type: string
+                              tlsSecret:
+                                type: string
+                              annotations:
+                                type: object
+                                additionalProperties:
+                                  type: string
+                          env:
+                            type: object
+                            additionalProperties:
+                              type: string
+                  status:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+
+    # ── PRDeployment CRD ───────────────────────────────────────────
+    - apiVersion: apiextensions.k8s.io/v1
+      kind: CustomResourceDefinition
+      metadata:
+        name: prdeployments.kube-gitops.centerionware.app
+      spec:
+        group: kube-gitops.centerionware.app
+        scope: Namespaced
+        names:
+          plural: prdeployments
+          singular: prdeployment
+          kind: PRDeployment
+          shortNames: ["prd"]
+        versions:
+          - name: v1alpha1
+            served: true
+            storage: true
+            subresources:
+              status: {}
+            additionalPrinterColumns:
+              - name: Platform
+                type: string
+                jsonPath: .spec.platform
+              - name: PR
+                type: integer
+                jsonPath: .spec.prNumber
+              - name: Branch
+                type: string
+                jsonPath: .spec.branch
+              - name: Author
+                type: string
+                jsonPath: .spec.author
+              - name: State
+                type: string
+                jsonPath: .status.state
+              - name: AppPhase
+                type: string
+                jsonPath: .status.appPhase
+              - name: URL
+                type: string
+                jsonPath: .status.url
+              - name: Age
+                type: date
+                jsonPath: .metadata.creationTimestamp
+            schema:
+              openAPIV3Schema:
+                type: object
+                properties:
+                  spec:
+                    type: object
+                    required: ["gitRepoRef", "platform", "repoURL", "prNumber", "branch", "headSHA", "author", "appRef", "appNamespace"]
+                    properties:
+                      gitRepoRef:
+                        type: string
+                      platform:
+                        type: string
+                      repoURL:
+                        type: string
+                      prNumber:
+                        type: integer
+                      branch:
+                        type: string
+                      headSHA:
+                        type: string
+                      author:
+                        type: string
+                      authorAssociation:
+                        type: string
+                      title:
+                        type: string
+                      appRef:
+                        type: string
+                      appNamespace:
+                        type: string
+                  status:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
 ```
 
-Apply with:
-
-```bash
-kubectl apply -f the-above.yaml
-```
-
-kube-deploy will clone this repo, build the binary, and run the operator.
-The webhook endpoint will be available at `https://gitops.example.com/webhook/<namespace>/<gitrepo-name>`.
+kube-deploy applies the `resources` entries before starting the operator, so by the
+time the binary is running, its CRDs and RBAC are already in place. The webhook
+endpoint will be available at `https://gitops.example.com/webhook/<namespace>/<gitrepo-name>`.
 
 ---
 
