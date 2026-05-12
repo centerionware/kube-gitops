@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"kube-gitops/api"
+	api "kube-gitops/api/v1alpha1"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
