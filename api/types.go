@@ -1,4 +1,4 @@
-package v1alpha1
+package api
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -200,7 +200,6 @@ type PRDeploySpec struct {
 }
 
 // PRBuildOverrides are the build fields users can set per-GitRepo.
-// Mirrors kube-deploy BuildSpec fields that make sense to override at this level.
 type PRBuildOverrides struct {
 	BaseImage      string `json:"baseImage,omitempty"`
 	InstallCmd     string `json:"installCmd,omitempty"`
@@ -227,9 +226,9 @@ type PRIngressOverrides struct {
 }
 
 type PRGatewayOverrides struct {
-	Enabled    bool              `json:"enabled"`
-	GatewayRef PRGatewayRef      `json:"gatewayRef"`
-	TLSSecret  string            `json:"tlsSecret,omitempty"`
+	Enabled     bool              `json:"enabled"`
+	GatewayRef  PRGatewayRef      `json:"gatewayRef"`
+	TLSSecret   string            `json:"tlsSecret,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
