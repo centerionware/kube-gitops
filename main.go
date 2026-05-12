@@ -12,6 +12,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -29,6 +30,11 @@ func init() {
 	utilruntime.Must(kubedeploy.AddToScheme(scheme))
 	utilruntime.Must(corev1.AddToScheme(scheme))
 	utilruntime.Must(networkingv1.AddToScheme(scheme))
+
+	// Required: registers ListOptions conversion for our custom API groups.
+	// Without this the reflector cache cannot list/watch our CRDs.
+	metav1.AddToGroupVersion(scheme, api.GroupVersion)
+	metav1.AddToGroupVersion(scheme, kubedeploy.GroupVersion)
 
 	if err := gatewayv1.Install(scheme); err != nil {
 		log.Printf("warning: gateway API scheme registration failed (CRDs may not be installed): %v", err)
@@ -48,8 +54,8 @@ func main() {
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
-		Metrics:                metricsserver.Options{BindAddress: "0"}, // disabled — we serve /metrics ourselves
-		HealthProbeBindAddress: "0",                                     // disabled — we serve /healthz ourselves
+		Metrics:                metricsserver.Options{BindAddress: "0"},
+		HealthProbeBindAddress: "0",
 	})
 	if err != nil {
 		log.Printf("manager init failed: %v", err)
