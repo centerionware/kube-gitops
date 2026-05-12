@@ -40,35 +40,34 @@ func main() {
 	}
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
 
+	addr := os.Getenv("ADDR")
+	if addr == "" {
+		addr = ":8080"
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme: scheme,
+		Scheme:                 scheme,
+		MetricsBindAddress:     "0",  // disabled — we serve /metrics ourselves
+		HealthProbeBindAddress: "0",  // disabled — we serve /healthz ourselves
 	})
 	if err != nil {
 		log.Printf("manager init failed: %v", err)
 		os.Exit(1)
 	}
 
-	webhookAddr := os.Getenv("WEBHOOK_ADDR")
-	if webhookAddr == "" {
-		webhookAddr = ":8080"
-	}
-
-	// The webhook server needs a k8s client to load secrets for HMAC validation.
-	// We use the manager's client so it benefits from the informer cache.
 	gitRepoReconciler := &controllers.GitRepoReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 	}
 
-	webhookServer := webhook.NewServer(
+	srv := webhook.NewServer(
 		mgr.GetClient(),
-		webhookAddr,
+		addr,
 		func(ctx context.Context, event webhook.PREvent) error {
-			// Route the validated event to the correct GitRepo reconciler
 			return gitRepoReconciler.HandleWebhookEvent(ctx, event)
 		},
 	)
-	gitRepoReconciler.WebhookServer = webhookServer
+	gitRepoReconciler.WebhookServer = srv
 
 	if err := controllers.SetupGitRepo(mgr, gitRepoReconciler); err != nil {
 		log.Printf("GitRepo controller setup failed: %v", err)
@@ -83,9 +82,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Run the webhook server in the background under the manager's context
-	if err := mgr.Add(webhookServer); err != nil {
-		log.Printf("failed to add webhook server to manager: %v", err)
+	if err := mgr.Add(srv); err != nil {
+		log.Printf("failed to add HTTP server to manager: %v", err)
 		os.Exit(1)
 	}
 
