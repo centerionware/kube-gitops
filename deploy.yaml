@@ -7,19 +7,6 @@ spec:
   repo: https://git.centerionware.com/0xdeadc0de/kube-gitops
   updateInterval: 10m
 
-  build:
-    dockerfileMode: inline
-    dockerfile: |
-      FROM golang:1.22-alpine AS builder
-      WORKDIR /app
-      COPY . .
-      RUN apk add --no-cache ca-certificates git
-      RUN go mod tidy
-      RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o kube-gitops ./main.go
-      FROM scratch
-      COPY --from=builder /app/kube-gitops /kube-gitops
-      COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-      ENTRYPOINT ["/kube-gitops"]
 
   run:
     command: ["/kube-gitops"]
