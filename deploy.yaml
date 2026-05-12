@@ -7,70 +7,48 @@ spec:
   repo: https://git.centerionware.com/0xdeadc0de/kube-gitops
   updateInterval: 10m
 
-
   run:
     command: ["/kube-gitops"]
     port: 8080
     replicas: 1
-    serviceAccountName: kube-gitops
     resources:
       cpuRequest: 50m
       memoryRequest: 64Mi
       cpuLimit: 200m
       memoryLimit: 128Mi
 
+  rbac:
+    clusterRoles:
+      - name: kube-gitops
+        rules:
+          - apiGroups: ["kube-gitops.centerionware.app"]
+            resources: ["gitrepos", "gitrepos/status", "prdeployments", "prdeployments/status"]
+            verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+          - apiGroups: ["kube-deploy.centerionware.app"]
+            resources: ["apps", "apps/status", "containerapps", "containerapps/status"]
+            verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+          - apiGroups: [""]
+            resources: ["secrets"]
+            verbs: ["get", "list", "watch"]
+          - apiGroups: [""]
+            resources: ["events"]
+            verbs: ["create", "patch"]
+          - apiGroups: ["networking.k8s.io"]
+            resources: ["ingresses"]
+            verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+          - apiGroups: ["gateway.networking.k8s.io"]
+            resources: ["httproutes"]
+            verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
   ingress:
     enabled: true
     host: gitops.centerionware.com
-    className: nginx
+    className: cloudflare-tunnel
 
   env:
     LOG_DEV_MODE: "false"
 
   resources:
-
-    - apiVersion: v1
-      kind: ServiceAccount
-      metadata:
-        name: kube-gitops
-        namespace: kube-deploy
-
-    - apiVersion: rbac.authorization.k8s.io/v1
-      kind: ClusterRole
-      metadata:
-        name: kube-gitops
-      rules:
-        - apiGroups: ["kube-gitops.centerionware.app"]
-          resources: ["gitrepos", "gitrepos/status", "prdeployments", "prdeployments/status"]
-          verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-        - apiGroups: ["kube-deploy.centerionware.app"]
-          resources: ["apps", "apps/status", "containerapps", "containerapps/status"]
-          verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-        - apiGroups: [""]
-          resources: ["secrets"]
-          verbs: ["get", "list", "watch"]
-        - apiGroups: [""]
-          resources: ["events"]
-          verbs: ["create", "patch"]
-        - apiGroups: ["networking.k8s.io"]
-          resources: ["ingresses"]
-          verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-        - apiGroups: ["gateway.networking.k8s.io"]
-          resources: ["httproutes"]
-          verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-
-    - apiVersion: rbac.authorization.k8s.io/v1
-      kind: ClusterRoleBinding
-      metadata:
-        name: kube-gitops
-      roleRef:
-        apiGroup: rbac.authorization.k8s.io
-        kind: ClusterRole
-        name: kube-gitops
-      subjects:
-        - kind: ServiceAccount
-          name: kube-gitops
-          namespace: kube-deploy
 
     - apiVersion: apiextensions.k8s.io/v1
       kind: CustomResourceDefinition
