@@ -3,7 +3,7 @@ package policy
 import (
 	"strings"
 
-	"kube-gitops/api"
+	api "kube-gitops/api/v1alpha1"
 	"kube-gitops/webhook"
 )
 
