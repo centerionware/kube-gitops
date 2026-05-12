@@ -1,5 +1,6 @@
 package controllers
 
+
 import (
 	"context"
 	"encoding/json"
@@ -9,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 )
+
+const giteaDefaultAssociation = "MEMBER"
 
 func fetchGiteaOpenPRs(ctx context.Context, repoURL, token string) ([]openPR, error) {
 	baseURL, owner, repo, err := giteaBaseOwnerRepo(repoURL)
