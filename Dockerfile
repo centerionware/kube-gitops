@@ -1,13 +1,18 @@
-FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS builder
-ARG TARGETOS
-ARG TARGETARCH
-WORKDIR /src
-COPY go.mod ./
-RUN go mod download
+FROM golang:1.26-alpine AS builder
+WORKDIR /app
+
 COPY . .
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -trimpath -ldflags="-s -w" -o /out/kube-gitops ./main.go
+
+# Init module if not present (safe)
+RUN apk add --no-cache ca-certificates git
+RUN go mod tidy
+
+RUN CGO_ENABLED=0 GOOS=linux go build -o app
+
+
+# ---------- Final ----------
 FROM scratch
+COPY --from=builder /app/app /app
+# copy CA certs
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-COPY --from=builder /out/kube-gitops /kube-gitops
-ENTRYPOINT ["/kube-gitops"]
+ENTRYPOINT ["/app"]
