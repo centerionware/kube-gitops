@@ -8,13 +8,24 @@ spec:
   updateInterval: 10m
 
   build:
-    baseImage: golang:1.22-alpine
-    installCmd: go mod download
-    buildCmd: go build -trimpath -ldflags="-s -w" -o /app/kube-gitops ./main.go
-    gitSecret: kube-gitops-git-secret
+    dockerfileMode: inline
+    dockerfile: |
+      FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS builder
+      ARG TARGETOS
+      ARG TARGETARCH
+      WORKDIR /src
+      COPY go.mod go.sum ./
+      RUN go mod download
+      COPY . .
+      RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+          go build -trimpath -ldflags="-s -w" -o /out/kube-gitops ./main.go
+      FROM scratch
+      COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+      COPY --from=builder /out/kube-gitops /kube-gitops
+      ENTRYPOINT ["/kube-gitops"]
 
   run:
-    command: ["/app/kube-gitops"]
+    command: ["/kube-gitops"]
     port: 8080
     replicas: 1
     serviceAccountName: kube-gitops
@@ -26,9 +37,8 @@ spec:
 
   ingress:
     enabled: true
-    host: gitops.centerionware.com   # <-- change this
+    host: gitops.centerionware.com
     className: nginx
-    # tlsSecret: gitops-tls
 
   env:
     LOG_DEV_MODE: "false"
