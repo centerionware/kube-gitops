@@ -8,7 +8,7 @@ import (
 	"strings"
 	"text/template"
 
-	"kube-gitops/api"
+	api "kube-gitops/api/v1alpha1"
 	"kube-gitops/kubedeploy"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
