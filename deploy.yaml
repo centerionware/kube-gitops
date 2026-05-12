@@ -15,7 +15,7 @@ spec:
       ARG TARGETARCH
       WORKDIR /src
       COPY go.mod ./
-      RUN go mod download
+      RUN go mod tidy
       COPY . .
       RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
           go build -trimpath -ldflags="-s -w" -o /out/kube-gitops ./main.go
