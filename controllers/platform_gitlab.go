@@ -1,5 +1,6 @@
 package controllers
 
+
 import (
 	"context"
 	"encoding/json"
@@ -9,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 )
+
+const gitlabDefaultAssociation = "MEMBER"
 
 func fetchGitLabOpenMRs(ctx context.Context, repoURL, token string) ([]openPR, error) {
 	baseURL, projectPath, err := gitlabBaseAndPath(repoURL)
