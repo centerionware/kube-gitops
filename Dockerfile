@@ -15,4 +15,4 @@ FROM scratch
 COPY --from=builder /app/app /kube-gitops
 # copy CA certs
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-ENTRYPOINT ["/app"]
+ENTRYPOINT ["/kube-gitops"]
