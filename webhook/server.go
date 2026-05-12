@@ -20,8 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// Handler is a function that processes a validated webhook payload.
-// The platform adapter parses the raw body into a PREvent and calls back.
+// Handler processes a validated, parsed webhook event.
 type Handler func(ctx context.Context, event PREvent) error
 
 // PREvent is the normalized representation of a pull request event
@@ -68,33 +67,30 @@ type PREvent struct {
 	CommentAuthorAssociation string
 }
 
-// RouteEntry maps a webhook path to its GitRepo and handler.
-type RouteEntry struct {
-	GitRepo api.GitRepo
-	Handler Handler
+// routeEntry maps a webhook path to its GitRepo.
+type routeEntry struct {
+	gitRepo api.GitRepo
 }
 
 // Server is the webhook HTTP server. It multiplexes incoming requests
 // across all registered GitRepo routes, validates HMAC signatures,
-// and dispatches normalized PREvents to registered handlers.
+// and dispatches normalized PREvents to the registered handler.
 type Server struct {
 	client  client.Client
-	mux     *http.ServeMux
 	server  *http.Server
 	mu      sync.RWMutex
-	routes  map[string]RouteEntry // path → entry
+	routes  map[string]routeEntry // path → gitrepo
 	handler Handler
 }
 
 func NewServer(c client.Client, addr string, h Handler) *Server {
 	s := &Server{
 		client:  c,
-		routes:  make(map[string]RouteEntry),
+		routes:  make(map[string]routeEntry),
 		handler: h,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/webhook/", s.dispatch)
-	s.mux = mux
 	s.server = &http.Server{
 		Addr:         addr,
 		Handler:      mux,
@@ -108,7 +104,7 @@ func NewServer(c client.Client, addr string, h Handler) *Server {
 func (s *Server) Register(gr api.GitRepo) {
 	path := webhookPath(gr)
 	s.mu.Lock()
-	s.routes[path] = RouteEntry{GitRepo: gr}
+	s.routes[path] = routeEntry{gitRepo: gr}
 	s.mu.Unlock()
 }
 
@@ -119,7 +115,8 @@ func (s *Server) Deregister(gr api.GitRepo) {
 	s.mu.Unlock()
 }
 
-// Start begins serving. Blocks until ctx is cancelled.
+// Start begins serving. Satisfies controller-runtime's manager.Runnable.
+// Blocks until ctx is cancelled.
 func (s *Server) Start(ctx context.Context) error {
 	logger := log.FromContext(ctx)
 	logger.Info("webhook server listening", "addr", s.server.Addr)
@@ -150,10 +147,8 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	path := r.URL.Path
-
 	s.mu.RLock()
-	entry, ok := s.routes[path]
+	entry, ok := s.routes[r.URL.Path]
 	s.mu.RUnlock()
 
 	if !ok {
@@ -161,9 +156,9 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	gr := entry.GitRepo
+	gr := entry.gitRepo
 
-	// Read body — cap at 10MB to prevent abuse
+	// Cap body at 10MB to prevent abuse
 	body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
 	if err != nil {
 		http.Error(w, "failed to read body", http.StatusBadRequest)
@@ -179,17 +174,14 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-
-		platform := gr.Spec.Platform
-		if !validateSignature(platform, r, body, secret) {
+		if !validateSignature(gr.Spec.Platform, r, body, secret) {
 			logger.Info("webhook signature validation failed",
-				"gitrepo", gr.Name, "path", path, "platform", platform)
+				"gitrepo", gr.Name, "path", r.URL.Path, "platform", gr.Spec.Platform)
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 	}
 
-	// Dispatch to platform adapter for parsing
 	event, skip, err := parsePlatformEvent(gr.Spec.Platform, r, body)
 	if err != nil {
 		logger.Error(err, "failed to parse webhook event", "gitrepo", gr.Name)
@@ -197,7 +189,6 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if skip {
-		// Not a PR-related event — acknowledge and move on
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -214,7 +205,6 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// loadSecret reads the named k8s Secret and returns the value of the "secret" key.
 func (s *Server) loadSecret(ctx context.Context, namespace, name string) ([]byte, error) {
 	var secret corev1.Secret
 	if err := s.client.Get(ctx, types.NamespacedName{
@@ -230,26 +220,22 @@ func (s *Server) loadSecret(ctx context.Context, namespace, name string) ([]byte
 	return val, nil
 }
 
-// validateSignature checks the platform-appropriate HMAC signature header.
-// GitHub and Gitea use X-Hub-Signature-256 with HMAC-SHA256.
-// GitLab uses X-Gitlab-Token as a plain token comparison.
+// validateSignature checks the platform-appropriate HMAC header.
+// GitHub, Gitea, Forgejo: X-Hub-Signature-256 (HMAC-SHA256, hex-encoded).
+// GitLab: X-Gitlab-Token (plain token comparison).
 func validateSignature(platform string, r *http.Request, body, secret []byte) bool {
 	switch platform {
 	case "github", "gitea", "forgejo":
-		sig := r.Header.Get("X-Hub-Signature-256")
+		sig := strings.TrimPrefix(r.Header.Get("X-Hub-Signature-256"), "sha256=")
 		if sig == "" {
 			return false
 		}
-		sig = strings.TrimPrefix(sig, "sha256=")
 		mac := hmac.New(sha256.New, secret)
 		mac.Write(body)
-		expected := hex.EncodeToString(mac.Sum(nil))
-		return hmac.Equal([]byte(sig), []byte(expected))
+		return hmac.Equal([]byte(sig), []byte(hex.EncodeToString(mac.Sum(nil))))
 
 	case "gitlab":
-		// GitLab sends the token as a plain header value
-		token := r.Header.Get("X-Gitlab-Token")
-		return hmac.Equal([]byte(token), secret)
+		return hmac.Equal([]byte(r.Header.Get("X-Gitlab-Token")), secret)
 
 	default:
 		return false
@@ -257,13 +243,10 @@ func validateSignature(platform string, r *http.Request, body, secret []byte) bo
 }
 
 // webhookPath returns the HTTP path for a GitRepo's webhook endpoint.
-// Uses spec.trigger.webhookPath if set, otherwise defaults to
-// /webhook/<namespace>/<name>
 func webhookPath(gr api.GitRepo) string {
-	if gr.Spec.Trigger.WebhookPath != "" {
-		p := gr.Spec.Trigger.WebhookPath
+	if p := gr.Spec.Trigger.WebhookPath; p != "" {
 		if !strings.HasPrefix(p, "/") {
-			p = "/" + p
+			return "/" + p
 		}
 		return p
 	}
