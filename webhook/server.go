@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	api "kube-gitops/api/v1alpha1"
+	"kube-gitops/api/v1alpha1"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -26,61 +27,38 @@ type Handler func(ctx context.Context, event PREvent) error
 // PREvent is the normalized representation of a pull request event
 // across all supported platforms.
 type PREvent struct {
-	// Action is one of: opened, synchronize, closed, labeled, unlabeled, comment
-	Action string
-
-	// Platform is the source platform: github, gitlab, gitea, forgejo
-	Platform string
-
-	// RepoURL is the HTTPS clone URL of the repository
-	RepoURL string
-
-	// PRNumber is the pull/merge request number
-	PRNumber int
-
-	// Branch is the PR head branch name
-	Branch string
-
-	// HeadSHA is the commit SHA at the tip of the PR branch
-	HeadSHA string
-
-	// Author is the username of the PR author
-	Author string
-
-	// AuthorAssociation is the platform-reported role of the author
-	// e.g. OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR, NONE
-	AuthorAssociation string
-
-	// Title is the PR title
-	Title string
-
-	// Labels are the current labels on the PR
-	Labels []string
-
-	// CommentBody is populated when Action == "comment"
-	CommentBody string
-
-	// CommentAuthor is the commenter's username, when Action == "comment"
-	CommentAuthor string
-
-	// CommentAuthorAssociation is the commenter's association, when Action == "comment"
+	Action                   string
+	Platform                 string
+	RepoURL                  string
+	PRNumber                 int
+	Branch                   string
+	HeadSHA                  string
+	Author                   string
+	AuthorAssociation        string
+	Title                    string
+	Labels                   []string
+	CommentBody              string
+	CommentAuthor            string
 	CommentAuthorAssociation string
 }
 
-// routeEntry maps a webhook path to its GitRepo.
 type routeEntry struct {
-	gitRepo api.GitRepo
+	gitRepo v1alpha1.GitRepo
 }
 
-// Server is the webhook HTTP server. It multiplexes incoming requests
-// across all registered GitRepo routes, validates HMAC signatures,
-// and dispatches normalized PREvents to the registered handler.
+// Server is a single HTTP server handling all traffic on one port:
+//
+//	GET  /healthz        — liveness probe
+//	GET  /readyz         — readiness probe
+//	GET  /metrics        — basic runtime metrics (JSON)
+//	POST /webhook/...    — per-GitRepo webhook endpoints
 type Server struct {
 	client  client.Client
 	server  *http.Server
 	mu      sync.RWMutex
-	routes  map[string]routeEntry // path → gitrepo
+	routes  map[string]routeEntry
 	handler Handler
+	ready   bool
 }
 
 func NewServer(c client.Client, addr string, h Handler) *Server {
@@ -89,8 +67,13 @@ func NewServer(c client.Client, addr string, h Handler) *Server {
 		routes:  make(map[string]routeEntry),
 		handler: h,
 	}
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/webhook/", s.dispatch)
+	mux.HandleFunc("/healthz", s.handleHealth)
+	mux.HandleFunc("/readyz", s.handleReady)
+	mux.HandleFunc("/metrics", s.handleMetrics)
+	mux.HandleFunc("/webhook/", s.handleWebhook)
+
 	s.server = &http.Server{
 		Addr:         addr,
 		Handler:      mux,
@@ -101,25 +84,25 @@ func NewServer(c client.Client, addr string, h Handler) *Server {
 }
 
 // Register adds or updates the route for a GitRepo.
-func (s *Server) Register(gr api.GitRepo) {
-	path := webhookPath(gr)
+func (s *Server) Register(gr v1alpha1.GitRepo) {
 	s.mu.Lock()
-	s.routes[path] = routeEntry{gitRepo: gr}
+	s.routes[webhookPath(gr)] = routeEntry{gitRepo: gr}
 	s.mu.Unlock()
 }
 
 // Deregister removes the route for a GitRepo.
-func (s *Server) Deregister(gr api.GitRepo) {
+func (s *Server) Deregister(gr v1alpha1.GitRepo) {
 	s.mu.Lock()
 	delete(s.routes, webhookPath(gr))
 	s.mu.Unlock()
 }
 
-// Start begins serving. Satisfies controller-runtime's manager.Runnable.
-// Blocks until ctx is cancelled.
+// Start satisfies controller-runtime manager.Runnable.
 func (s *Server) Start(ctx context.Context) error {
 	logger := log.FromContext(ctx)
-	logger.Info("webhook server listening", "addr", s.server.Addr)
+	logger.Info("HTTP server listening", "addr", s.server.Addr)
+
+	s.ready = true
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -132,13 +115,46 @@ func (s *Server) Start(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
+		s.ready = false
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		return s.server.Shutdown(shutCtx)
 	}
 }
 
-func (s *Server) dispatch(w http.ResponseWriter, r *http.Request) {
+// ── Route handlers ────────────────────────────────────────────────────────────
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"ok"}`))
+}
+
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if s.ready {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"ready"}`))
+	} else {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"status":"not ready"}`))
+	}
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	routeCount := len(s.routes)
+	s.mu.RUnlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"registered_webhooks": routeCount,
+		"uptime":              time.Now().UTC().Format(time.RFC3339),
+	})
+}
+
+func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	logger := log.FromContext(ctx)
 
@@ -158,25 +174,21 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request) {
 
 	gr := entry.gitRepo
 
-	// Cap body at 10MB to prevent abuse
 	body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
 	if err != nil {
 		http.Error(w, "failed to read body", http.StatusBadRequest)
 		return
 	}
 
-	// Validate HMAC signature if a webhookSecret is configured
 	if gr.Spec.Trigger.WebhookSecret != "" {
 		secret, err := s.loadSecret(ctx, gr.Namespace, gr.Spec.Trigger.WebhookSecret)
 		if err != nil {
-			logger.Error(err, "failed to load webhook secret",
-				"gitrepo", gr.Name, "secret", gr.Spec.Trigger.WebhookSecret)
+			logger.Error(err, "failed to load webhook secret", "gitrepo", gr.Name)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
 		if !validateSignature(gr.Spec.Platform, r, body, secret) {
-			logger.Info("webhook signature validation failed",
-				"gitrepo", gr.Name, "path", r.URL.Path, "platform", gr.Spec.Platform)
+			logger.Info("webhook signature validation failed", "gitrepo", gr.Name)
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -205,6 +217,8 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
 func (s *Server) loadSecret(ctx context.Context, namespace, name string) ([]byte, error) {
 	var secret corev1.Secret
 	if err := s.client.Get(ctx, types.NamespacedName{
@@ -220,9 +234,6 @@ func (s *Server) loadSecret(ctx context.Context, namespace, name string) ([]byte
 	return val, nil
 }
 
-// validateSignature checks the platform-appropriate HMAC header.
-// GitHub, Gitea, Forgejo: X-Hub-Signature-256 (HMAC-SHA256, hex-encoded).
-// GitLab: X-Gitlab-Token (plain token comparison).
 func validateSignature(platform string, r *http.Request, body, secret []byte) bool {
 	switch platform {
 	case "github", "gitea", "forgejo":
@@ -233,17 +244,14 @@ func validateSignature(platform string, r *http.Request, body, secret []byte) bo
 		mac := hmac.New(sha256.New, secret)
 		mac.Write(body)
 		return hmac.Equal([]byte(sig), []byte(hex.EncodeToString(mac.Sum(nil))))
-
 	case "gitlab":
 		return hmac.Equal([]byte(r.Header.Get("X-Gitlab-Token")), secret)
-
 	default:
 		return false
 	}
 }
 
-// webhookPath returns the HTTP path for a GitRepo's webhook endpoint.
-func webhookPath(gr api.GitRepo) string {
+func webhookPath(gr v1alpha1.GitRepo) string {
 	if p := gr.Spec.Trigger.WebhookPath; p != "" {
 		if !strings.HasPrefix(p, "/") {
 			return "/" + p
