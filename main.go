@@ -5,7 +5,7 @@ import (
 	"log"
 	"os"
 
-	"kube-gitops/api"
+	api "kube-gitops/api/v1alpha1"
 	"kube-gitops/controllers"
 	"kube-gitops/kubedeploy"
 	"kube-gitops/webhook"
