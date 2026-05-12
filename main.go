@@ -17,6 +17,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
@@ -47,8 +48,8 @@ func main() {
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
-		MetricsBindAddress:     "0",  // disabled — we serve /metrics ourselves
-		HealthProbeBindAddress: "0",  // disabled — we serve /healthz ourselves
+		Metrics:                metricsserver.Options{BindAddress: "0"}, // disabled — we serve /metrics ourselves
+		HealthProbeBindAddress: "0",                                     // disabled — we serve /healthz ourselves
 	})
 	if err != nil {
 		log.Printf("manager init failed: %v", err)
