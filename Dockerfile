@@ -12,7 +12,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o app
 
 # ---------- Final ----------
 FROM scratch
-COPY --from=builder /app/app /app
+COPY --from=builder /app/app /kube-gitops
 # copy CA certs
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 ENTRYPOINT ["/app"]
