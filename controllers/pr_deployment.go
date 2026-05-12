@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"kube-gitops/api"
+	api "kube-gitops/api/v1alpha1"
 	"kube-gitops/builder"
 	"kube-gitops/kubedeploy"
 
