@@ -9,6 +9,7 @@ import (
 
 	api "kube-gitops/api/v1alpha1"
 	"kube-gitops/builder"
+	"kube-gitops/platform"
 	"kube-gitops/policy"
 	"kube-gitops/webhook"
 
@@ -25,16 +26,24 @@ import (
 const (
 	gitrepoFinalizer    = "kube-gitops.centerionware.app/gitrepo"
 	defaultPollInterval = 2 * time.Minute
+
+	// Annotation stored on the GitRepo to track the platform webhook ID
+	// so we can deregister it when the GitRepo is deleted.
+	annotationWebhookID = "kube-gitops.centerionware.app/webhook-id"
 )
 
 // GitRepoReconciler watches GitRepo CRDs and manages:
-//   - poll loops (trigger.mode=poll)
-//   - webhook route registration (trigger.mode=webhook)
-//   - creation/deletion of PRDeployment objects in response to PR events
+//   - webhook route registration + platform webhook auto-registration
+//   - poll loops
+//   - PRDeployment lifecycle in response to events
 type GitRepoReconciler struct {
 	client.Client
 	Scheme        *runtime.Scheme
 	WebhookServer *webhook.Server
+
+	// ExternalBaseURL is the publicly reachable base URL of our webhook server,
+	// e.g. "https://gitops.centerionware.com". Set from EXTERNAL_URL env var.
+	ExternalBaseURL string
 }
 
 func SetupGitRepo(mgr ctrl.Manager, r *GitRepoReconciler) error {
@@ -52,21 +61,12 @@ func (r *GitRepoReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Deletion
+	// ── Deletion ──────────────────────────────────────────────────
 	if !gr.DeletionTimestamp.IsZero() {
-		if r.WebhookServer != nil {
-			r.WebhookServer.Deregister(gr)
-		}
-		if containsString(gr.Finalizers, gitrepoFinalizer) {
-			gr.Finalizers = removeString(gr.Finalizers, gitrepoFinalizer)
-			if err := r.Update(ctx, &gr); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
-		return ctrl.Result{}, nil
+		return r.reconcileDelete(ctx, &gr)
 	}
 
-	// Finalizer
+	// ── Finalizer ─────────────────────────────────────────────────
 	if !containsString(gr.Finalizers, gitrepoFinalizer) {
 		gr.Finalizers = append(gr.Finalizers, gitrepoFinalizer)
 		if err := r.Update(ctx, &gr); err != nil {
@@ -75,18 +75,12 @@ func (r *GitRepoReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Webhook mode — register route, event-driven from here
+	// ── Webhook mode ───────────────────────────────────────────────
 	if gr.Spec.Trigger.Mode == "webhook" {
-		if r.WebhookServer != nil {
-			r.WebhookServer.Register(gr)
-		}
-		if err := r.setStatus(ctx, &gr, "Ready", "webhook registered", ""); err != nil {
-			logger.Error(err, "failed to update status")
-		}
-		return ctrl.Result{}, nil
+		return r.reconcileWebhook(ctx, &gr)
 	}
 
-	// Poll mode
+	// ── Poll mode ──────────────────────────────────────────────────
 	interval := defaultPollInterval
 	if gr.Spec.Trigger.PollInterval != "" {
 		if d, err := time.ParseDuration(gr.Spec.Trigger.PollInterval); err == nil {
@@ -102,6 +96,102 @@ func (r *GitRepoReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	_ = r.setStatus(ctx, &gr, "Ready", "poll ok", time.Now().UTC().Format(time.RFC3339))
 	return ctrl.Result{RequeueAfter: interval}, nil
+}
+
+// reconcileWebhook registers the webhook route locally and on the platform.
+func (r *GitRepoReconciler) reconcileWebhook(ctx context.Context, gr *api.GitRepo) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	// Register with our local HTTP server so incoming requests are routed correctly
+	if r.WebhookServer != nil {
+		r.WebhookServer.Register(*gr)
+	}
+
+	// Build the full public URL for this webhook
+	hookURL := r.webhookURL(gr)
+
+	// Update status.webhookUrl so operators can see it in kubectl get gr
+	if gr.Status.WebhookURL != hookURL {
+		gr.Status.WebhookURL = hookURL
+	}
+
+	// Auto-register with the platform if we have a secret and haven't done it yet
+	existingID := gr.Annotations[annotationWebhookID]
+	if existingID == "" && gr.Spec.Trigger.WebhookSecret != "" && r.ExternalBaseURL != "" {
+		token, err := r.loadGitToken(ctx, gr)
+		if err != nil {
+			logger.Error(err, "cannot load git token for webhook registration")
+			_ = r.setStatus(ctx, gr, "Error", fmt.Sprintf("cannot load git token: %v", err), "")
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+
+		secret, err := r.loadWebhookSecret(ctx, gr)
+		if err != nil {
+			logger.Error(err, "cannot load webhook secret")
+			_ = r.setStatus(ctx, gr, "Error", fmt.Sprintf("cannot load webhook secret: %v", err), "")
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+
+		n, err := platform.New(gr.Spec.Platform, gr.Spec.Repo, token)
+		if err != nil {
+			logger.Error(err, "cannot create platform notifier")
+			_ = r.setStatus(ctx, gr, "Error", err.Error(), "")
+			return ctrl.Result{}, nil
+		}
+
+		hookID, err := n.RegisterWebhook(ctx, gr.Spec.Repo, hookURL, string(secret))
+		if err != nil {
+			logger.Error(err, "failed to register webhook with platform")
+			_ = r.setStatus(ctx, gr, "Error", fmt.Sprintf("webhook registration failed: %v", err), "")
+			return ctrl.Result{RequeueAfter: 60 * time.Second}, nil
+		}
+
+		logger.Info("registered webhook with platform", "hookID", hookID, "url", hookURL)
+
+		if gr.Annotations == nil {
+			gr.Annotations = make(map[string]string)
+		}
+		gr.Annotations[annotationWebhookID] = hookID
+		if err := r.Update(ctx, gr); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	_ = r.setStatus(ctx, gr, "Ready", "webhook ready: "+hookURL, "")
+	return ctrl.Result{}, nil
+}
+
+// reconcileDelete cleans up: deregisters webhook from platform, removes local route.
+func (r *GitRepoReconciler) reconcileDelete(ctx context.Context, gr *api.GitRepo) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	if r.WebhookServer != nil {
+		r.WebhookServer.Deregister(*gr)
+	}
+
+	// Deregister from platform if we have a stored webhook ID
+	if hookID := gr.Annotations[annotationWebhookID]; hookID != "" {
+		token, err := r.loadGitToken(ctx, gr)
+		if err == nil {
+			n, err := platform.New(gr.Spec.Platform, gr.Spec.Repo, token)
+			if err == nil {
+				if err := n.DeregisterWebhook(ctx, gr.Spec.Repo, hookID); err != nil {
+					logger.Error(err, "failed to deregister webhook from platform", "hookID", hookID)
+					// Non-fatal — continue with deletion
+				} else {
+					logger.Info("deregistered webhook from platform", "hookID", hookID)
+				}
+			}
+		}
+	}
+
+	if containsString(gr.Finalizers, gitrepoFinalizer) {
+		gr.Finalizers = removeString(gr.Finalizers, gitrepoFinalizer)
+		if err := r.Update(ctx, gr); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	return ctrl.Result{}, nil
 }
 
 // poll queries the platform API for open PRs and reconciles PRDeployment objects.
@@ -146,7 +236,6 @@ func (r *GitRepoReconciler) poll(ctx context.Context, gr *api.GitRepo) error {
 		}
 
 		if existing, alreadyExists := existingByPR[pr.Number]; alreadyExists {
-			// Update SHA if the PR head changed since last poll
 			if existing.Spec.HeadSHA != pr.HeadSHA {
 				existing.Spec.HeadSHA = pr.HeadSHA
 				if err := r.Update(ctx, &existing); err != nil {
@@ -158,8 +247,7 @@ func (r *GitRepoReconciler) poll(ctx context.Context, gr *api.GitRepo) error {
 		}
 
 		if !policy.EvaluatePR(gr.Spec.PRPolicy, event) {
-			logger.Info("poll: PR failed trust policy, skipping",
-				"pr", pr.Number, "author", pr.Author)
+			logger.Info("poll: PR failed trust policy", "pr", pr.Number, "author", pr.Author)
 			delete(existingByPR, pr.Number)
 			continue
 		}
@@ -170,7 +258,6 @@ func (r *GitRepoReconciler) poll(ctx context.Context, gr *api.GitRepo) error {
 		delete(existingByPR, pr.Number)
 	}
 
-	// Delete PRDeployments for PRs no longer open
 	for _, prd := range existingByPR {
 		prdCopy := prd
 		logger.Info("poll: PR closed, deleting PRDeployment", "pr", prd.Spec.PRNumber)
@@ -182,10 +269,10 @@ func (r *GitRepoReconciler) poll(ctx context.Context, gr *api.GitRepo) error {
 	return nil
 }
 
-// HandleEvent is called by the webhook server when a validated PR event arrives.
+// HandleEvent is called when a validated PR event arrives (webhook or poll).
 func (r *GitRepoReconciler) HandleEvent(ctx context.Context, gr api.GitRepo, event webhook.PREvent) error {
 	logger := log.FromContext(ctx)
-	logger.Info("webhook event", "gitrepo", gr.Name, "action", event.Action, "pr", event.PRNumber)
+	logger.Info("PR event", "gitrepo", gr.Name, "action", event.Action, "pr", event.PRNumber)
 
 	switch event.Action {
 	case "opened", "synchronize":
@@ -200,7 +287,6 @@ func (r *GitRepoReconciler) HandleEvent(ctx context.Context, gr api.GitRepo, eve
 
 	case "labeled", "unlabeled":
 		if !policy.EvaluatePR(gr.Spec.PRPolicy, event) {
-			// Label that was required got removed — tear down
 			return r.deletePRDeployment(ctx, &gr, event.PRNumber)
 		}
 		return r.createOrUpdatePRDeployment(ctx, &gr, event)
@@ -209,11 +295,10 @@ func (r *GitRepoReconciler) HandleEvent(ctx context.Context, gr api.GitRepo, eve
 		if !policy.EvaluatePR(gr.Spec.PRPolicy, event) {
 			return nil
 		}
-		// Comment events don't carry head SHA — fetch it
 		if event.HeadSHA == "" {
 			token, err := r.loadGitToken(ctx, &gr)
 			if err != nil {
-				return fmt.Errorf("load git secret for comment trigger: %w", err)
+				return fmt.Errorf("load git token for comment trigger: %w", err)
 			}
 			sha, branch, err := fetchPRHead(ctx, gr.Spec.Platform, gr.Spec.Repo, event.PRNumber, token)
 			if err != nil {
@@ -228,8 +313,7 @@ func (r *GitRepoReconciler) HandleEvent(ctx context.Context, gr api.GitRepo, eve
 	return nil
 }
 
-// HandleWebhookEvent is called by the webhook server with a validated, parsed event.
-// It looks up the GitRepo that owns this repo URL and dispatches to HandleEvent.
+// HandleWebhookEvent looks up the GitRepo for the incoming event and dispatches.
 func (r *GitRepoReconciler) HandleWebhookEvent(ctx context.Context, event webhook.PREvent) error {
 	var list api.GitRepoList
 	if err := r.List(ctx, &list); err != nil {
@@ -245,27 +329,28 @@ func (r *GitRepoReconciler) HandleWebhookEvent(ctx context.Context, event webhoo
 
 func (r *GitRepoReconciler) createOrUpdatePRDeployment(ctx context.Context, gr *api.GitRepo, event webhook.PREvent) error {
 	prdName := prDeploymentName(*gr, event.PRNumber, event.Branch)
-
 	var existing api.PRDeployment
 	err := r.Get(ctx, types.NamespacedName{Name: prdName, Namespace: gr.Namespace}, &existing)
 	if err != nil && !errors.IsNotFound(err) {
 		return err
 	}
-
 	if errors.IsNotFound(err) {
 		return r.createPRDeployment(ctx, gr, event)
 	}
-
-	// Already exists — update head SHA on synchronize
 	if event.HeadSHA != "" && existing.Spec.HeadSHA != event.HeadSHA {
 		existing.Spec.HeadSHA = event.HeadSHA
 		return r.Update(ctx, &existing)
 	}
-
 	return nil
 }
 
 func (r *GitRepoReconciler) createPRDeployment(ctx context.Context, gr *api.GitRepo, event webhook.PREvent) error {
+	// Ensure target namespace exists
+	targetNS := builder.AppNamespace(*gr)
+	if err := r.ensureNamespace(ctx, targetNS); err != nil {
+		return fmt.Errorf("ensure namespace %s: %w", targetNS, err)
+	}
+
 	appName, err := builder.AppName(*gr, event.PRNumber, event.Branch)
 	if err != nil {
 		return err
@@ -301,7 +386,7 @@ func (r *GitRepoReconciler) createPRDeployment(ctx context.Context, gr *api.GitR
 			AuthorAssociation: event.AuthorAssociation,
 			Title:             event.Title,
 			AppRef:            appName,
-			AppNamespace:      builder.AppNamespace(*gr),
+			AppNamespace:      targetNS,
 		},
 	}
 
@@ -328,12 +413,39 @@ func (r *GitRepoReconciler) deletePRDeployment(ctx context.Context, gr *api.GitR
 	return nil
 }
 
+func (r *GitRepoReconciler) ensureNamespace(ctx context.Context, name string) error {
+	var ns corev1.Namespace
+	err := r.Get(ctx, types.NamespacedName{Name: name}, &ns)
+	if err == nil {
+		return nil
+	}
+	if !errors.IsNotFound(err) {
+		return err
+	}
+	return r.Create(ctx, &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+			Labels: map[string]string{
+				"kube-gitops.centerionware.app/managed": "true",
+			},
+		},
+	})
+}
+
 func (r *GitRepoReconciler) setStatus(ctx context.Context, gr *api.GitRepo, phase, message, pollTime string) error {
 	gr.Status.Phase = phase
 	gr.Status.Message = message
 	gr.Status.LastUpdated = time.Now().UTC().Format(time.RFC3339)
 	if pollTime != "" {
 		gr.Status.LastPollTime = pollTime
+	}
+	// Recount active PRDeployments
+	var list api.PRDeploymentList
+	if err := r.List(ctx, &list,
+		client.InNamespace(gr.Namespace),
+		client.MatchingLabels{"kube-gitops.centerionware.app/gitrepo": gr.Name},
+	); err == nil {
+		gr.Status.ActivePRDeployments = len(list.Items)
 	}
 	return r.Status().Update(ctx, gr)
 }
@@ -349,21 +461,39 @@ func (r *GitRepoReconciler) loadGitToken(ctx context.Context, gr *api.GitRepo) (
 	if token, ok := secret.Data["password"]; ok {
 		return strings.TrimSpace(string(token)), nil
 	}
-	return "", fmt.Errorf("secret %s has no 'password' key (API polling requires HTTPS token auth)", gr.Spec.GitSecret)
+	return "", fmt.Errorf("secret %s has no 'password' key (requires HTTPS token auth)", gr.Spec.GitSecret)
 }
 
-// prDeploymentName returns a stable, unique name for a PRDeployment object.
-// Uses AppName (which slugifies the repo+PR number) as the base.
+func (r *GitRepoReconciler) loadWebhookSecret(ctx context.Context, gr *api.GitRepo) ([]byte, error) {
+	var secret corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{
+		Namespace: gr.Namespace,
+		Name:      gr.Spec.Trigger.WebhookSecret,
+	}, &secret); err != nil {
+		return nil, fmt.Errorf("get webhook secret %s: %w", gr.Spec.Trigger.WebhookSecret, err)
+	}
+	val, ok := secret.Data["secret"]
+	if !ok {
+		return nil, fmt.Errorf("webhook secret %s has no 'secret' key", gr.Spec.Trigger.WebhookSecret)
+	}
+	return val, nil
+}
+
+func (r *GitRepoReconciler) webhookURL(gr *api.GitRepo) string {
+	path := webhook.PublicPath(*gr)
+	base := strings.TrimRight(r.ExternalBaseURL, "/")
+	return base + path
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
 func prDeploymentName(gr api.GitRepo, prNumber int, branch string) string {
 	name, err := builder.AppName(gr, prNumber, branch)
 	if err != nil {
-		// Fallback — should not happen in practice
 		return fmt.Sprintf("pr-%d", prNumber)
 	}
 	return name
 }
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 func containsString(slice []string, s string) bool {
 	for _, v := range slice {
@@ -411,8 +541,8 @@ func fetchOpenPRs(ctx context.Context, platform, repoURL, token string) ([]openP
 	}
 }
 
-func fetchPRHead(ctx context.Context, platform, repoURL string, prNumber int, token string) (sha, branch string, err error) {
-	switch platform {
+func fetchPRHead(ctx context.Context, pl, repoURL string, prNumber int, token string) (sha, branch string, err error) {
+	switch pl {
 	case "github":
 		return fetchGitHubPRHead(ctx, repoURL, prNumber, token)
 	case "gitlab":
@@ -420,11 +550,10 @@ func fetchPRHead(ctx context.Context, platform, repoURL string, prNumber int, to
 	case "gitea", "forgejo":
 		return fetchGiteaPRHead(ctx, repoURL, prNumber, token)
 	default:
-		return "", "", fmt.Errorf("unsupported platform: %s", platform)
+		return "", "", fmt.Errorf("unsupported platform: %s", pl)
 	}
 }
 
-// orgRepo extracts "org/repo" from a full repo URL.
 func orgRepo(repoURL string) string {
 	u := strings.TrimSuffix(repoURL, ".git")
 	parts := strings.Split(u, "/")
