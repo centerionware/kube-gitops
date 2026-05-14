@@ -43,32 +43,28 @@ func (in *GitRepoList) DeepCopyObject() runtime.Object {
 
 type GitRepoSpec struct {
 	// Platform identifies the git hosting platform.
-	// forgejo is treated as gitea (identical API).
 	// +kubebuilder:validation:Enum=github;gitlab;gitea;forgejo
 	Platform string `json:"platform"`
 
 	// Repo is the full HTTPS URL of the repository.
-	// e.g. https://github.com/org/myapp
 	Repo string `json:"repo"`
 
-	// GitSecret is the name of a Kubernetes Secret in the same namespace
-	// containing platform credentials. Supports two formats:
-	//   HTTPS/token: username + password (token) keys
-	//   SSH:         ssh-privatekey key
-	// This secret is also forwarded to the generated kube-deploy App CR
-	// so it can clone the PR branch during the build.
+	// GitSecret is the name of a Kubernetes Secret containing platform credentials.
+	//   username + password (token) — for HTTPS clone and API calls
+	//   ssh-privatekey             — for SSH clone only (poll mode requires token)
 	GitSecret string `json:"gitSecret"`
 
 	// Trigger defines how the operator detects new pull requests.
 	Trigger TriggerSpec `json:"trigger"`
 
-	// PRPolicy defines who is allowed to trigger a PR deployment.
-	// Requests from untrusted actors are silently ignored.
+	// PRPolicy defines the trust model — who may trigger a deployment.
 	PRPolicy PRPolicySpec `json:"prPolicy,omitempty"`
 
-	// PRDeploy defines the kube-deploy App template to use when
-	// generating deployments for pull requests.
+	// PRDeploy defines how to build and deploy each PR preview.
 	PRDeploy PRDeploySpec `json:"prDeploy,omitempty"`
+
+	// Notify configures automated comments posted back to the PR thread.
+	Notify NotifySpec `json:"notify,omitempty"`
 }
 
 // ----------------------------------------------------------------
@@ -76,130 +72,147 @@ type GitRepoSpec struct {
 // ----------------------------------------------------------------
 
 type TriggerSpec struct {
-	// Mode selects the trigger mechanism.
-	// webhook: the git platform sends events to our ingress endpoint (preferred).
-	// poll:    we periodically query the platform API for open PRs.
+	// Mode: webhook (preferred, interrupt-driven) or poll (periodic).
 	// +kubebuilder:validation:Enum=webhook;poll
 	Mode string `json:"mode"`
 
-	// PollInterval is how often to query the platform API when mode=poll.
-	// Accepts Go duration strings e.g. "2m", "30s". Default: "2m".
+	// PollInterval is how often to query the platform API in poll mode.
+	// Go duration string e.g. "2m". Default: "2m".
 	// +optional
 	PollInterval string `json:"pollInterval,omitempty"`
 
-	// WebhookSecret is the name of a Kubernetes Secret containing the
-	// shared secret used to validate incoming webhook payloads (HMAC-SHA256).
-	// Required when mode=webhook.
-	// The Secret must have a key named "secret".
+	// WebhookSecret is the name of a Secret with a "secret" key used for
+	// HMAC-SHA256 payload validation. Required when mode=webhook.
 	// +optional
 	WebhookSecret string `json:"webhookSecret,omitempty"`
 
-	// WebhookPath is the HTTP path this repo's webhook listens on.
-	// Defaults to /webhook/<namespace>/<name>.
-	// Must be unique across all GitRepo objects in the cluster.
+	// WebhookPath overrides the default /webhook/<namespace>/<name> path.
 	// +optional
 	WebhookPath string `json:"webhookPath,omitempty"`
 }
 
 // ----------------------------------------------------------------
-// PR POLICY — trust model
+// PR POLICY
 // ----------------------------------------------------------------
 
 type PRPolicySpec struct {
-	// AllowedAuthorAssociations lists the platform-reported author association
-	// levels that are permitted to trigger a deployment automatically.
-	//
-	// GitHub values: OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR, FIRST_TIMER,
-	//                FIRST_TIME_CONTRIBUTOR, MANNEQUIN, NONE
-	// GitLab/Gitea:  mapped to equivalent values by the platform adapter.
-	//
-	// Defaults to ["OWNER", "MEMBER", "COLLABORATOR"] if not set.
+	// AllowedAuthorAssociations are the platform author roles that auto-trigger.
+	// GitHub: OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR, FIRST_TIME_CONTRIBUTOR, NONE
+	// Defaults to ["OWNER", "MEMBER", "COLLABORATOR"].
 	// +optional
 	AllowedAuthorAssociations []string `json:"allowedAuthorAssociations,omitempty"`
 
-	// RequireLabel, if set, means a PR must carry this label before a
-	// deployment is triggered. Useful as a manual gate for external contributors.
-	// e.g. "deploy-preview"
+	// RequireLabel gates deployment on the PR carrying this label.
 	// +optional
 	RequireLabel string `json:"requireLabel,omitempty"`
 
-	// AllowCommentTrigger enables triggering a deployment by posting a
-	// comment containing the value of CommentTriggerPhrase on an open PR.
-	// The commenter must satisfy AllowedAuthorAssociations.
+	// AllowCommentTrigger enables /deploy-style comment triggers.
 	// +optional
 	AllowCommentTrigger bool `json:"allowCommentTrigger,omitempty"`
 
-	// CommentTriggerPhrase is the exact string that must appear in a comment
-	// to trigger a deployment. Defaults to "/deploy".
+	// CommentTriggerPhrase is the phrase that triggers a deploy. Default: "/deploy".
 	// +optional
 	CommentTriggerPhrase string `json:"commentTriggerPhrase,omitempty"`
 
-	// AllowedCommenters is an optional explicit list of usernames allowed to
-	// use the comment trigger, regardless of their association level.
-	// Use ["*"] to allow any repository member.
+	// AllowedCommenters is an explicit allowlist of usernames for comment triggers.
+	// Use ["*"] to allow any member.
 	// +optional
 	AllowedCommenters []string `json:"allowedCommenters,omitempty"`
 }
 
 // ----------------------------------------------------------------
-// PR DEPLOY — kube-deploy App template
+// NOTIFY — automated PR comments
+// ----------------------------------------------------------------
+
+type NotifySpec struct {
+	// OnDeploy posts a comment when the preview deployment becomes ready.
+	// Default: true.
+	// +optional
+	OnDeploy *bool `json:"onDeploy,omitempty"`
+
+	// OnError posts a comment when the deployment fails.
+	// Default: true.
+	// +optional
+	OnError *bool `json:"onError,omitempty"`
+
+	// OnClose posts a comment when the preview is torn down.
+	// Default: false.
+	// +optional
+	OnClose *bool `json:"onClose,omitempty"`
+
+	// DeployTemplate is the Go template for the deploy-ready comment.
+	// Available vars: .URL .PRNumber .Branch .SHA .Author .RepoName
+	// Default: "🚀 Preview deployed: {{.URL}}"
+	// +optional
+	DeployTemplate string `json:"deployTemplate,omitempty"`
+
+	// ErrorTemplate is the Go template for the error comment.
+	// Available vars: .Error .PRNumber .Branch .SHA .Author .RepoName
+	// Default: "❌ Preview deployment failed: {{.Error}}"
+	// +optional
+	ErrorTemplate string `json:"errorTemplate,omitempty"`
+
+	// CloseTemplate is the Go template for the teardown comment.
+	// Default: "🧹 Preview environment removed."
+	// +optional
+	CloseTemplate string `json:"closeTemplate,omitempty"`
+}
+
+// ----------------------------------------------------------------
+// PR DEPLOY
 // ----------------------------------------------------------------
 
 type PRDeploySpec struct {
 	// Namespace to create kube-deploy App CRs in.
-	// Defaults to the GitRepo's own namespace.
+	// Defaults to the GitRepo's own namespace. Created if it doesn't exist.
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
 
-	// NameTemplate is a Go template for the App CR name.
-	// Available variables: .RepoName .PRNumber .BranchSlug
+	// NameTemplate is a Go template for the generated App CR name.
+	// Vars: .RepoName .PRNumber .BranchSlug
 	// Default: "{{.RepoName}}-pr-{{.PRNumber}}"
 	// +optional
 	NameTemplate string `json:"nameTemplate,omitempty"`
 
-	// IngressHostTemplate is a Go template for the ingress hostname.
-	// Available variables: .RepoName .PRNumber .BranchSlug .BaseDomain
+	// IngressHostTemplate is a Go template for the preview ingress hostname.
+	// Vars: .RepoName .PRNumber .BranchSlug .BaseDomain
 	// Default: "pr-{{.PRNumber}}.{{.RepoName}}.{{.BaseDomain}}"
 	// +optional
 	IngressHostTemplate string `json:"ingressHostTemplate,omitempty"`
 
-	// BaseDomain is substituted into IngressHostTemplate as .BaseDomain.
+	// BaseDomain is substituted as .BaseDomain in IngressHostTemplate.
 	// +optional
 	BaseDomain string `json:"baseDomain,omitempty"`
 
-	// InjectPREnv, when true (default), injects PR metadata as environment
-	// variables into the generated App:
-	//   GITOPS_PR_NUMBER, GITOPS_PR_BRANCH, GITOPS_PR_SHA,
-	//   GITOPS_PR_AUTHOR, GITOPS_REPO_URL
+	// InjectPREnv injects PR metadata as env vars into the App. Default: true.
+	// Vars injected: GITOPS_PR_NUMBER, GITOPS_PR_BRANCH, GITOPS_PR_SHA,
+	//                GITOPS_PR_AUTHOR, GITOPS_PR_TITLE, GITOPS_REPO_URL,
+	//                GITOPS_PREVIEW_URL
 	// +optional
 	InjectPREnv *bool `json:"injectPREnv,omitempty"`
 
-	// Build overrides forwarded verbatim to the generated kube-deploy App's
-	// spec.build block. gitSecret is always set from the GitRepo's GitSecret.
+	// Build overrides for the generated App's spec.build.
+	// gitSecret is always forwarded from GitRepo.spec.gitSecret.
 	// +optional
 	Build PRBuildOverrides `json:"build,omitempty"`
 
-	// Run overrides forwarded verbatim to the generated kube-deploy App's
-	// spec.run block.
+	// Run overrides for the generated App's spec.run.
 	// +optional
 	Run PRRunOverrides `json:"run,omitempty"`
 
-	// Ingress configures the ingress block on the generated App CR.
+	// Ingress configures the preview ingress. Mutually exclusive with Gateway.
 	// +optional
 	Ingress *PRIngressOverrides `json:"ingress,omitempty"`
 
-	// Gateway configures the gateway block on the generated App CR
-	// (mutually exclusive with Ingress).
+	// Gateway configures the preview HTTPRoute. Mutually exclusive with Ingress.
 	// +optional
 	Gateway *PRGatewayOverrides `json:"gateway,omitempty"`
 
-	// Env is additional static environment variables to inject into the App.
-	// Merged with InjectPREnv values; explicit keys here take precedence.
+	// Env is static environment variables merged into the App (win over InjectPREnv).
 	// +optional
 	Env map[string]string `json:"env,omitempty"`
 }
 
-// PRBuildOverrides are the build fields users can set per-GitRepo.
 type PRBuildOverrides struct {
 	BaseImage      string `json:"baseImage,omitempty"`
 	InstallCmd     string `json:"installCmd,omitempty"`
@@ -210,7 +223,6 @@ type PRBuildOverrides struct {
 	Registry       string `json:"registry,omitempty"`
 }
 
-// PRRunOverrides are the run fields users can set per-GitRepo.
 type PRRunOverrides struct {
 	Command  []string `json:"command,omitempty"`
 	Port     int      `json:"port,omitempty"`
@@ -243,21 +255,20 @@ type PRGatewayRef struct {
 // ----------------------------------------------------------------
 
 type GitRepoStatus struct {
-	// Phase summarises operator state for this GitRepo.
+	// Phase: Ready, Error, Registering
 	Phase string `json:"phase,omitempty"`
 
-	// Message is a human-readable description of the current state.
+	// Message is a human-readable status description.
 	Message string `json:"message,omitempty"`
 
-	// WebhookURL is the fully qualified URL the git platform should send
-	// events to. Populated when mode=webhook.
+	// WebhookURL is the fully qualified public URL for this repo's webhook endpoint.
+	// Shown in kubectl get gr — register this URL with your git platform.
 	WebhookURL string `json:"webhookUrl,omitempty"`
 
-	// ActivePRDeployments is the count of currently running PR deployments.
+	// ActivePRDeployments is the count of currently live PR previews.
 	ActivePRDeployments int `json:"activePrDeployments,omitempty"`
 
-	// LastPollTime is the timestamp of the most recent successful poll.
-	// Only relevant when mode=poll.
+	// LastPollTime is the timestamp of the last successful API poll.
 	LastPollTime string `json:"lastPollTime,omitempty"`
 
 	// LastUpdated is the timestamp of the last status change.
@@ -265,7 +276,7 @@ type GitRepoStatus struct {
 }
 
 // ----------------------------------------------------------------
-// PRDeployment — tracks a single PR's deployment lifecycle
+// PRDeployment — tracks one PR's full deployment lifecycle
 // ----------------------------------------------------------------
 
 type PRDeployment struct {
@@ -295,54 +306,47 @@ func (in *PRDeploymentList) DeepCopyObject() runtime.Object {
 }
 
 type PRDeploymentSpec struct {
-	// GitRepoRef is the name of the GitRepo that owns this PRDeployment.
+	// GitRepoRef is the parent GitRepo name.
 	GitRepoRef string `json:"gitRepoRef"`
 
-	// Platform mirrors GitRepo.spec.platform.
-	Platform string `json:"platform"`
-
-	// RepoURL is the clone URL of the repository.
-	RepoURL string `json:"repoURL"`
-
-	// PRNumber is the pull/merge request number on the platform.
-	PRNumber int `json:"prNumber"`
-
-	// Branch is the PR's head branch name.
-	Branch string `json:"branch"`
-
-	// HeadSHA is the git commit SHA at the tip of the PR branch.
-	HeadSHA string `json:"headSHA"`
-
-	// Author is the username of the PR author.
-	Author string `json:"author"`
-
-	// AuthorAssociation is the platform-reported relationship of the author
-	// to the repository (e.g. MEMBER, COLLABORATOR).
+	Platform  string `json:"platform"`
+	RepoURL   string `json:"repoURL"`
+	PRNumber  int    `json:"prNumber"`
+	Branch    string `json:"branch"`
+	HeadSHA   string `json:"headSHA"`
+	Author    string `json:"author"`
 	AuthorAssociation string `json:"authorAssociation"`
+	Title     string `json:"title"`
 
-	// Title is the PR title (informational).
-	Title string `json:"title"`
-
-	// AppRef is the name of the kube-deploy App CR we created.
-	AppRef string `json:"appRef"`
-
-	// AppNamespace is the namespace of the kube-deploy App CR.
+	// AppRef is the name of the kube-deploy App CR we own.
+	AppRef       string `json:"appRef"`
 	AppNamespace string `json:"appNamespace"`
 }
 
 type PRDeploymentStatus struct {
-	// State is the high-level lifecycle state.
-	// +kubebuilder:validation:Enum=pending;deploying;running;error;closed;deleting
+	// State: pending, deploying, running, error, closed, deleting
 	State string `json:"state,omitempty"`
 
-	// AppPhase mirrors the kube-deploy App's status.phase.
+	// AppPhase mirrors kube-deploy App status.phase.
 	AppPhase string `json:"appPhase,omitempty"`
 
-	// URL is the live preview URL for this PR (ingress host).
+	// Image mirrors kube-deploy App status.image.
+	Image string `json:"image,omitempty"`
+
+	// Commit mirrors kube-deploy App status.commit.
+	Commit string `json:"commit,omitempty"`
+
+	// URL is the live preview URL.
 	URL string `json:"url,omitempty"`
 
-	// Message is a human-readable status description or error.
+	// Message is a human-readable status or error description.
 	Message string `json:"message,omitempty"`
+
+	// NotifiedDeploy tracks whether we've posted the deploy-ready comment.
+	NotifiedDeploy bool `json:"notifiedDeploy,omitempty"`
+
+	// NotifiedError tracks whether we've posted the error comment.
+	NotifiedError bool `json:"notifiedError,omitempty"`
 
 	// LastUpdated is the timestamp of the last status change.
 	LastUpdated string `json:"lastUpdated,omitempty"`
