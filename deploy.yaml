@@ -28,8 +28,8 @@ spec:
             resources: ["apps", "apps/status", "containerapps", "containerapps/status"]
             verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
           - apiGroups: [""]
-            resources: ["secrets"]
-            verbs: ["get", "list", "watch"]
+            resources: ["secrets", "namespaces"]
+            verbs: ["get", "list", "watch", "create"]
           - apiGroups: [""]
             resources: ["events"]
             verbs: ["create", "patch"]
@@ -43,10 +43,11 @@ spec:
   ingress:
     enabled: true
     host: gitops.centerionware.com
-    className: cloudflare-tunnel
+    className: nginx
 
   env:
     LOG_DEV_MODE: "false"
+    EXTERNAL_URL: "https://gitops.centerionware.com"
 
   resources:
 
@@ -81,6 +82,9 @@ spec:
               - name: ActivePRs
                 type: integer
                 jsonPath: .status.activePrDeployments
+              - name: WebhookURL
+                type: string
+                jsonPath: .status.webhookUrl
               - name: Age
                 type: date
                 jsonPath: .metadata.creationTimestamp
@@ -133,6 +137,27 @@ spec:
                             type: array
                             items:
                               type: string
+                      notify:
+                        type: object
+                        properties:
+                          onDeploy:
+                            type: boolean
+                            default: true
+                          onError:
+                            type: boolean
+                            default: true
+                          onClose:
+                            type: boolean
+                            default: false
+                          deployTemplate:
+                            type: string
+                            default: "🚀 Preview deployed: {{.URL}}"
+                          errorTemplate:
+                            type: string
+                            default: "❌ Preview deployment failed: {{.Error}}"
+                          closeTemplate:
+                            type: string
+                            default: "🧹 Preview environment removed."
                       prDeploy:
                         type: object
                         properties:
@@ -262,6 +287,12 @@ spec:
               - name: AppPhase
                 type: string
                 jsonPath: .status.appPhase
+              - name: Image
+                type: string
+                jsonPath: .status.image
+              - name: Commit
+                type: string
+                jsonPath: .status.commit
               - name: URL
                 type: string
                 jsonPath: .status.url
