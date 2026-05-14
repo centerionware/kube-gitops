@@ -260,3 +260,9 @@ func webhookPath(gr v1alpha1.GitRepo) string {
 	}
 	return fmt.Sprintf("/webhook/%s/%s", gr.Namespace, gr.Name)
 }
+
+// PublicPath returns the webhook HTTP path for a GitRepo.
+// Exported so controllers can build the full public URL.
+func PublicPath(gr v1alpha1.GitRepo) string {
+	return webhookPath(gr)
+}
