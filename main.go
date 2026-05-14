@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"strings"
 
 	api "kube-gitops/api/v1alpha1"
 	"kube-gitops/controllers"
@@ -32,12 +33,11 @@ func init() {
 	utilruntime.Must(networkingv1.AddToScheme(scheme))
 
 	// Required: registers ListOptions conversion for our custom API groups.
-	// Without this the reflector cache cannot list/watch our CRDs.
 	metav1.AddToGroupVersion(scheme, api.GroupVersion)
 	metav1.AddToGroupVersion(scheme, kubedeploy.GroupVersion)
 
 	if err := gatewayv1.Install(scheme); err != nil {
-		log.Printf("warning: gateway API scheme registration failed (CRDs may not be installed): %v", err)
+		log.Printf("warning: gateway API scheme not available: %v", err)
 	}
 }
 
@@ -47,10 +47,18 @@ func main() {
 	}
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
 
+	// ADDR is the single port we listen on for all traffic.
+	// Default: :8080
 	addr := os.Getenv("ADDR")
 	if addr == "" {
 		addr = ":8080"
 	}
+
+	// EXTERNAL_URL is the publicly reachable base URL of this operator,
+	// e.g. "https://gitops.centerionware.com".
+	// Required for automatic webhook registration with git platforms.
+	// If unset, webhook registration is skipped (register manually).
+	externalURL := strings.TrimRight(os.Getenv("EXTERNAL_URL"), "/")
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
@@ -63,8 +71,9 @@ func main() {
 	}
 
 	gitRepoReconciler := &controllers.GitRepoReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:          mgr.GetClient(),
+		Scheme:          mgr.GetScheme(),
+		ExternalBaseURL: externalURL,
 	}
 
 	srv := webhook.NewServer(
@@ -90,7 +99,7 @@ func main() {
 	}
 
 	if err := mgr.Add(srv); err != nil {
-		log.Printf("failed to add HTTP server to manager: %v", err)
+		log.Printf("failed to register HTTP server with manager: %v", err)
 		os.Exit(1)
 	}
 
