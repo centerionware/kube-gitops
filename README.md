@@ -110,3 +110,6 @@ PR closed
 - [Quickstart: Poll mode](docs/quickstart-poll.md)
 - [Quickstart: Webhook mode](docs/quickstart-webhook.md)
 - [Full configuration example](docs/example-complex.md)
+
+## AI Disclaimer
+This project and all documentation at public release was entirely written by Claude at the direction of one poor and silly engineer.
