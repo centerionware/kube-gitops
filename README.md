@@ -13,6 +13,12 @@ generating the right kube-deploy `App` CR, and posting status back to the PR.
 
 ---
 
+## Project Status
+
+Initial development phase should be done, new features and schema changes should be minimal. Everything needs to be thoroughly tested to ensure what's there now works.
+
+---
+
 ## Dependencies
 
 - **kube-deploy** must be installed and running in the cluster. kube-gitops
