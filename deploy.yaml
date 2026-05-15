@@ -4,7 +4,7 @@ metadata:
   name: kube-gitops
   namespace: kube-deploy
 spec:
-  repo: https://git.centerionware.com/0xdeadc0de/kube-gitops
+  repo: https://github.com/centerionware/kube-gitops
   updateInterval: 10m
 
   run:
