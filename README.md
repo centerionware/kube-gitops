@@ -1,6 +1,6 @@
 # kube-gitops
 
-Automatic PR preview deployments for Kubernetes.
+Automatic PR preview deployments for Kubernetes..
 
 When a pull request opens, kube-gitops creates a live preview environment for
 it. When the PR closes, the environment is torn down. No manual steps. No
