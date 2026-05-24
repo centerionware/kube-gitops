@@ -15,7 +15,6 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -38,7 +37,6 @@ type PRDeploymentReconciler struct {
 func SetupPRDeployment(mgr ctrl.Manager, r *PRDeploymentReconciler) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&api.PRDeployment{}).
-		Owns(&kubedeploy.App{}).
 		Complete(r)
 }
 
@@ -75,12 +73,20 @@ func (r *PRDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	// Ensure App CR exists
+	// Ensure App CR exists.
+	// Check annotation first — if we've already created it, go straight to
+	// syncStatus rather than hitting NotFound and creating again. This handles
+	// the window between Create returning and the cache catching up.
 	appKey := types.NamespacedName{Name: prd.Spec.AppRef, Namespace: prd.Spec.AppNamespace}
 	var existingApp kubedeploy.App
 	err := r.Get(ctx, appKey, &existingApp)
 
 	if errors.IsNotFound(err) {
+		// Only create if we haven't done so already
+		if prd.Annotations["kube-gitops.centerionware.app/app-created"] == "true" {
+			// Cache hasn't caught up yet — wait and retry
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
 		return r.createApp(ctx, gr, &prd)
 	}
 	if err != nil {
@@ -101,17 +107,17 @@ func (r *PRDeploymentReconciler) createApp(ctx context.Context, gr api.GitRepo, 
 		return ctrl.Result{}, nil
 	}
 
-	app.OwnerReferences = []metav1.OwnerReference{
-		{
-			APIVersion:         "kube-gitops.centerionware.app/v1alpha1",
-			Kind:               "PRDeployment",
-			Name:               prd.Name,
-			UID:                prd.UID,
-			BlockOwnerDeletion: boolPtr(true),
-		},
-	}
+	// Do NOT set a cross-namespace owner reference — Kubernetes silently drops
+	// them and the object still gets created, causing the loop we saw.
+	// Cleanup is handled by the PRDeployment finalizer in reconcileDelete instead.
+	app.OwnerReferences = nil
 
 	if err := r.Create(ctx, app); err != nil {
+		if errors.IsAlreadyExists(err) {
+			// Race — already exists, fall through to sync on next reconcile
+			logger.Info("App CR already exists, syncing", "app", app.Name)
+			return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+		}
 		logger.Error(err, "failed to create App CR")
 		_ = r.setPRDStatus(ctx, prd, "error", fmt.Sprintf("create App failed: %v", err), "", "", "")
 		return ctrl.Result{}, nil
@@ -119,7 +125,16 @@ func (r *PRDeploymentReconciler) createApp(ctx context.Context, gr api.GitRepo, 
 
 	logger.Info("created App CR", "app", app.Name, "ns", app.Namespace, "pr", prd.Spec.PRNumber)
 
-	// Commit status: pending
+	// Mark that we've created the App so the next reconcile goes to syncStatus
+	// rather than hitting NotFound and creating again.
+	if prd.Annotations == nil {
+		prd.Annotations = make(map[string]string)
+	}
+	prd.Annotations["kube-gitops.centerionware.app/app-created"] = "true"
+	if err := r.Update(ctx, prd); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	_ = r.postCommitStatus(ctx, gr, prd, "pending", "Preview deploying…", "")
 
 	return ctrl.Result{RequeueAfter: 15 * time.Second},
