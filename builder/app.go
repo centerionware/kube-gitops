@@ -70,9 +70,14 @@ func BuildApp(gr api.GitRepo, pr api.PRDeployment) (*kubedeploy.App, error) {
 	}
 
 	// Build spec
+	// Branch must never be empty — kube-deploy's CRD defaults it to "main"
+	// which would build the wrong thing. Fail loudly if branch is missing.
+	if pr.Spec.Branch == "" {
+		return nil, fmt.Errorf("PRDeployment %s has empty Branch — cannot build correct commit", pr.Name)
+	}
 	build := kubedeploy.BuildSpec{
 		Branch:    pr.Spec.Branch,
-		GitSecret: gr.Spec.GitSecret, // always forward auth
+		GitSecret: gr.Spec.GitSecret,
 	}
 	if cfg.Build.BaseImage != "" {
 		build.BaseImage = cfg.Build.BaseImage
