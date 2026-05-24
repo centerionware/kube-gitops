@@ -60,15 +60,22 @@ func (r *PRDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Fetch parent GitRepo for config
+	// Fetch parent GitRepo for config.
+	// If not found, requeue rather than immediately deleting — the cache may
+	// not have caught up yet. We only delete if the GitRepo is confirmed gone
+	// via a direct API call (not cached).
 	var gr api.GitRepo
 	if err := r.Get(ctx, types.NamespacedName{
 		Namespace: prd.Namespace,
 		Name:      prd.Spec.GitRepoRef,
 	}, &gr); err != nil {
 		if errors.IsNotFound(err) {
-			logger.Info("parent GitRepo gone, deleting PRDeployment")
-			return ctrl.Result{}, r.Delete(ctx, &prd)
+			logger.Info("parent GitRepo not found in cache, requeueing to confirm",
+				"gitrepo", prd.Spec.GitRepoRef)
+			// Requeue — if it's genuinely gone this will keep failing and
+			// the operator won't silently tear down a live preview.
+			// Manual deletion of the PRDeployment is the explicit cleanup path.
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 		return ctrl.Result{}, err
 	}
@@ -170,19 +177,30 @@ func (r *PRDeploymentReconciler) syncStatus(ctx context.Context, gr api.GitRepo,
 		}
 	}
 
-	// Post notifications when we transition into terminal states
+	// Post notifications when we transition into terminal states.
+	// Include the notification flags in the same status update to avoid
+	// a race between two separate Status().Update calls losing one write.
 	if state == "running" && !prd.Status.NotifiedDeploy {
 		_ = r.postCommitStatus(ctx, gr, prd, "success", "Preview ready", previewURL)
 		_ = r.postDeployComment(ctx, gr, prd, previewURL)
 		prd.Status.NotifiedDeploy = true
-		_ = r.Status().Update(ctx, prd)
+		prd.Status.State = state
+		prd.Status.AppPhase = appPhase
+		prd.Status.URL = previewURL
+		prd.Status.Image = appImage
+		prd.Status.Commit = appCommit
+		prd.Status.LastUpdated = time.Now().UTC().Format(time.RFC3339)
+		return ctrl.Result{RequeueAfter: 60 * time.Second}, r.Status().Update(ctx, prd)
 	}
 
 	if state == "error" && !prd.Status.NotifiedError {
 		_ = r.postCommitStatus(ctx, gr, prd, "failure", appPhase, "")
 		_ = r.postErrorComment(ctx, gr, prd, appPhase)
 		prd.Status.NotifiedError = true
-		_ = r.Status().Update(ctx, prd)
+		prd.Status.State = state
+		prd.Status.AppPhase = appPhase
+		prd.Status.LastUpdated = time.Now().UTC().Format(time.RFC3339)
+		return ctrl.Result{RequeueAfter: 60 * time.Second}, r.Status().Update(ctx, prd)
 	}
 
 	if state == "deploying" || state == "pending" {
@@ -193,6 +211,12 @@ func (r *PRDeploymentReconciler) syncStatus(ctx context.Context, gr api.GitRepo,
 
 func (r *PRDeploymentReconciler) reconcileDelete(ctx context.Context, prd *api.PRDeployment) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+	logger.Info("PRDeployment deletion triggered — tearing down App CR",
+		"pr", prd.Spec.PRNumber,
+		"branch", prd.Spec.Branch,
+		"app", prd.Spec.AppRef,
+		"appNamespace", prd.Spec.AppNamespace,
+	)
 
 	// Optionally post close comment
 	var gr api.GitRepo
