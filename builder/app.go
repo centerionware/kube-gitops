@@ -46,11 +46,11 @@ func BuildApp(gr api.GitRepo, pr api.PRDeployment) (*kubedeploy.App, error) {
 	// Ensure name is a valid k8s name
 	name = slugify(name)
 
-	// Target namespace
-	namespace := cfg.Namespace
-	if namespace == "" {
-		namespace = gr.Namespace
-	}
+	// App CR always lives in the GitRepo's namespace — that's where the git
+	// secret is, and kube-deploy looks for secrets in the App CR's namespace.
+	// prDeploy.namespace controls where kube-deploy puts the Deployment/Service/
+	// Ingress it creates, not where the App CR itself lives.
+	namespace := gr.Namespace
 
 	// Build env map — PR metadata first, then static overrides
 	env := make(map[string]string)
@@ -206,11 +206,9 @@ func AppName(gr api.GitRepo, prNumber int, branch string) (string, error) {
 	return slugify(name), nil
 }
 
-// AppNamespace returns the namespace Apps are created in for this GitRepo.
+// AppNamespace returns the namespace the App CR is created in.
+// This is always the GitRepo's own namespace so kube-deploy can find the git secret.
 func AppNamespace(gr api.GitRepo) string {
-	if gr.Spec.PRDeploy.Namespace != "" {
-		return gr.Spec.PRDeploy.Namespace
-	}
 	return gr.Namespace
 }
 
