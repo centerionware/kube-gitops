@@ -392,7 +392,7 @@ func (r *PRDeploymentReconciler) postCommitStatus(ctx context.Context, gr api.Gi
 
 func prStateFromAppPhase(phase string) string {
 	switch phase {
-	case "Running":
+	case "Ready", "Running":
 		return "running"
 	case "Error", "Failed":
 		return "error"
