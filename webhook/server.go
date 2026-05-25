@@ -30,6 +30,10 @@ type PREvent struct {
 	Action                   string
 	Platform                 string
 	RepoURL                  string
+	// CloneURL is the HTTPS clone URL of the HEAD repo.
+	// For fork PRs this differs from RepoURL — it's the fork's URL.
+	// Use this as spec.repo in the generated App CR.
+	CloneURL                 string
 	PRNumber                 int
 	Branch                   string
 	HeadSHA                  string
