@@ -249,6 +249,7 @@ func (r *GitRepoReconciler) poll(ctx context.Context, gr *api.GitRepo) error {
 			Action:            "opened",
 			Platform:          gr.Spec.Platform,
 			RepoURL:           gr.Spec.Repo,
+			CloneURL:          pr.CloneURL,
 			PRNumber:          pr.Number,
 			Branch:            pr.Branch,
 			HeadSHA:           pr.HeadSHA,
@@ -326,7 +327,11 @@ func (r *GitRepoReconciler) HandleEvent(ctx context.Context, gr api.GitRepo, eve
 
 	case "comment":
 		if !policy.EvaluatePR(gr.Spec.PRPolicy, event) {
-			logger.Info("comment failed trust policy", "pr", event.PRNumber, "author", event.CommentAuthor)
+			logger.Info("comment failed trust policy",
+				"pr", event.PRNumber,
+				"author", event.CommentAuthor,
+				"association", event.CommentAuthorAssociation,
+			)
 			return nil
 		}
 		if event.HeadSHA == "" {
@@ -415,6 +420,7 @@ func (r *GitRepoReconciler) createPRDeployment(ctx context.Context, gr *api.GitR
 			GitRepoRef:        gr.Name,
 			Platform:          event.Platform,
 			RepoURL:           event.RepoURL,
+			CloneURL:          event.CloneURL,
 			PRNumber:          event.PRNumber,
 			Branch:            event.Branch,
 			HeadSHA:           event.HeadSHA,
@@ -578,6 +584,7 @@ type openPR struct {
 	Title             string
 	Branch            string
 	HeadSHA           string
+	CloneURL          string
 	Author            string
 	AuthorAssociation string
 	Labels            []string
