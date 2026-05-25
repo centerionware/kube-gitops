@@ -262,8 +262,15 @@ type GitRepoStatus struct {
 	Message string `json:"message,omitempty"`
 
 	// WebhookURL is the fully qualified public URL for this repo's webhook endpoint.
-	// Shown in kubectl get gr — register this URL with your git platform.
 	WebhookURL string `json:"webhookUrl,omitempty"`
+
+	// WebhookStatus describes the current state of platform webhook registration.
+	// One of: registered, unregistered, failed, manual
+	WebhookStatus string `json:"webhookStatus,omitempty"`
+
+	// WebhookID is the platform-assigned hook ID, present when WebhookStatus=registered.
+	// This is what gets used to deregister on GitRepo deletion.
+	WebhookID string `json:"webhookId,omitempty"`
 
 	// ActivePRDeployments is the count of currently live PR previews.
 	ActivePRDeployments int `json:"activePrDeployments,omitempty"`
