@@ -69,9 +69,14 @@ func BuildApp(gr api.GitRepo, pr api.PRDeployment) (*kubedeploy.App, error) {
 		env[k] = v
 	}
 
-	// Build spec
-	// Branch must never be empty — kube-deploy's CRD defaults it to "main"
-	// which would build the wrong thing. Fail loudly if branch is missing.
+	// Use the head repo clone URL as spec.repo.
+	// For fork PRs this is the fork's URL — building from RepoURL (upstream)
+	// would clone main instead of the PR branch.
+	// For same-repo PRs CloneURL == RepoURL so this is always correct.
+	buildRepo := pr.Spec.CloneURL
+	if buildRepo == "" {
+		buildRepo = gr.Spec.Repo
+	}
 	if pr.Spec.Branch == "" {
 		return nil, fmt.Errorf("PRDeployment %s has empty Branch — cannot build correct commit", pr.Name)
 	}
@@ -178,7 +183,7 @@ func BuildApp(gr api.GitRepo, pr api.PRDeployment) (*kubedeploy.App, error) {
 			},
 		},
 		Spec: kubedeploy.AppSpec{
-			Repo:    gr.Spec.Repo,
+			Repo:    buildRepo, // fork URL for fork PRs, upstream URL for same-repo PRs
 			Env:     env,
 			Build:   build,
 			Run:     run,
