@@ -372,14 +372,15 @@ func (r *GitRepoReconciler) HandleEvent(ctx context.Context, gr api.GitRepo, eve
 			if err != nil {
 				return fmt.Errorf("load git token for comment trigger: %w", err)
 			}
-			sha, branch, err := fetchPRHead(ctx, gr.Spec.Platform, gr.Spec.Repo, event.PRNumber, token)
+			sha, branch, cloneURL, err := fetchPRHead(ctx, gr.Spec.Platform, gr.Spec.Repo, event.PRNumber, token)
 			if err != nil {
 				logger.Error(err, "failed to fetch PR head for comment trigger", "pr", event.PRNumber)
 				return fmt.Errorf("fetch PR head for comment trigger: %w", err)
 			}
-			logger.Info("fetched PR head for comment trigger", "pr", event.PRNumber, "branch", branch, "sha", sha)
+			logger.Info("fetched PR head for comment trigger", "pr", event.PRNumber, "branch", branch, "sha", sha, "cloneURL", cloneURL)
 			event.HeadSHA = sha
 			event.Branch = branch
+			event.CloneURL = cloneURL
 		}
 		return r.createOrUpdatePRDeployment(ctx, &gr, event)
 	}
@@ -636,16 +637,18 @@ func fetchOpenPRs(ctx context.Context, platform, repoURL, token string) ([]openP
 	}
 }
 
-func fetchPRHead(ctx context.Context, pl, repoURL string, prNumber int, token string) (sha, branch string, err error) {
+func fetchPRHead(ctx context.Context, pl, repoURL string, prNumber int, token string) (sha, branch, cloneURL string, err error) {
 	switch pl {
 	case "github":
 		return fetchGitHubPRHead(ctx, repoURL, prNumber, token)
 	case "gitlab":
-		return fetchGitLabMRHead(ctx, repoURL, prNumber, token)
+		sha, branch, err = fetchGitLabMRHead(ctx, repoURL, prNumber, token)
+		return sha, branch, repoURL, err // GitLab MRs are always same-repo
 	case "gitea", "forgejo":
-		return fetchGiteaPRHead(ctx, repoURL, prNumber, token)
+		sha, branch, err = fetchGiteaPRHead(ctx, repoURL, prNumber, token)
+		return sha, branch, repoURL, err // Gitea PRs are always same-repo for now
 	default:
-		return "", "", fmt.Errorf("unsupported platform: %s", pl)
+		return "", "", "", fmt.Errorf("unsupported platform: %s", pl)
 	}
 }
 
