@@ -81,6 +81,17 @@ func (r *GitRepoReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	// ── Poll mode ──────────────────────────────────────────────────
+	// Before polling, check if a webhook GitRepo exists for the same repo.
+	// Webhook always wins — poll backing off avoids duplicate PRDeployments
+	// and wasted API calls.
+	if conflict, name := r.findWebhookConflict(ctx, &gr); conflict {
+		msg := fmt.Sprintf("superseded by webhook GitRepo %q for the same repo — polling suspended", name)
+		logger.Info("poll suppressed", "reason", msg)
+		_ = r.setStatus(ctx, &gr, "Superseded", msg, "")
+		// Requeue slowly — just in case the webhook GitRepo is deleted and we
+		// need to resume. Not a tight loop.
+		return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+	}
 	interval := defaultPollInterval
 	if gr.Spec.Trigger.PollInterval != "" {
 		if d, err := time.ParseDuration(gr.Spec.Trigger.PollInterval); err == nil {
@@ -507,7 +518,26 @@ func (r *GitRepoReconciler) webhookURL(gr *api.GitRepo) string {
 	return base + path
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// findWebhookConflict checks if any other GitRepo in the cluster is configured
+// in webhook mode for the same platform + repo URL. Returns true and the
+// conflicting GitRepo's name if found.
+func (r *GitRepoReconciler) findWebhookConflict(ctx context.Context, gr *api.GitRepo) (bool, string) {
+	var list api.GitRepoList
+	if err := r.List(ctx, &list); err != nil {
+		return false, ""
+	}
+	for _, other := range list.Items {
+		if other.Name == gr.Name && other.Namespace == gr.Namespace {
+			continue // skip self
+		}
+		if other.Spec.Platform == gr.Spec.Platform &&
+			other.Spec.Repo == gr.Spec.Repo &&
+			other.Spec.Trigger.Mode == "webhook" {
+			return true, fmt.Sprintf("%s/%s", other.Namespace, other.Name)
+		}
+	}
+	return false, ""
+}
 
 func prDeploymentName(gr api.GitRepo, prNumber int, branch string) string {
 	name, err := builder.AppName(gr, prNumber, branch)
