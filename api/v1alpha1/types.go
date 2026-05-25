@@ -318,6 +318,8 @@ type PRDeploymentSpec struct {
 
 	Platform  string `json:"platform"`
 	RepoURL   string `json:"repoURL"`
+	// CloneURL is the HEAD repo clone URL — differs from RepoURL for fork PRs.
+	CloneURL  string `json:"cloneURL,omitempty"`
 	PRNumber  int    `json:"prNumber"`
 	Branch    string `json:"branch"`
 	HeadSHA   string `json:"headSHA"`
