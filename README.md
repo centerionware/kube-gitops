@@ -14,8 +14,31 @@ generating the right kube-deploy `App` CR, and posting status back to the PR.
 ---
 
 ## Project Status
+Testing phase 1:
 
-Initial development phase should be done, new features and schema changes should be minimal. Everything needs to be thoroughly tested to ensure what's there now works.
+Index:
+* ⬜ - Untested
+* ✅ - Tested Working
+* ☑️ - Partially Tested
+
+### Github
+
+* ☑️ - Test a repo with the poll method
+  * ⬜ - Test a PR from unauthorized user from a fork
+  * ✅ - Test a PR from project owner from branch
+* ⬜ - Test a Repo with the webhooks method
+  * ⬜ - Test a PR from unauthorized user from a fork
+  * ⬜ - Test a PR from project owner from  
+* ⬜ - Test broken builds to see what errors are reported
+  * ⬜ - Poll
+  * ⬜ - Webhook
+### Gitlab
+
+no testing done (yet I hope)
+
+### Gitea
+
+no testing done (yet I hope)
 
 ---
 
