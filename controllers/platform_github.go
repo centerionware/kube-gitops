@@ -61,25 +61,28 @@ func fetchGitHubOpenPRs(ctx context.Context, repoURL, token string) ([]openPR, e
 	return prs, nil
 }
 
-func fetchGitHubPRHead(ctx context.Context, repoURL string, prNumber int, token string) (sha, branch string, err error) {
+func fetchGitHubPRHead(ctx context.Context, repoURL string, prNumber int, token string) (sha, branch, cloneURL string, err error) {
 	or := orgRepo(repoURL)
 	url := fmt.Sprintf("https://api.github.com/repos/%s/pulls/%d", or, prNumber)
 
 	body, err := githubGET(ctx, url, token)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 
 	var raw struct {
 		Head struct {
-			Ref string `json:"ref"`
-			SHA string `json:"sha"`
+			Ref  string `json:"ref"`
+			SHA  string `json:"sha"`
+			Repo struct {
+				CloneURL string `json:"clone_url"`
+			} `json:"repo"`
 		} `json:"head"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
-		return "", "", fmt.Errorf("parse github PR head: %w", err)
+		return "", "", "", fmt.Errorf("parse github PR head: %w", err)
 	}
-	return raw.Head.SHA, raw.Head.Ref, nil
+	return raw.Head.SHA, raw.Head.Ref, raw.Head.Repo.CloneURL, nil
 }
 
 func githubGET(ctx context.Context, url, token string) ([]byte, error) {
