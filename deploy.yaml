@@ -18,27 +18,8 @@ spec:
       memoryLimit: 128Mi
 
   rbac:
-    clusterRoles:
-      - name: kube-gitops
-        rules:
-          - apiGroups: ["kube-gitops.centerionware.app"]
-            resources: ["gitrepos", "gitrepos/status", "prdeployments", "prdeployments/status"]
-            verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-          - apiGroups: ["kube-deploy.centerionware.app"]
-            resources: ["apps", "apps/status", "containerapps", "containerapps/status"]
-            verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-          - apiGroups: [""]
-            resources: ["secrets", "namespaces"]
-            verbs: ["get", "list", "watch", "create"]
-          - apiGroups: [""]
-            resources: ["events"]
-            verbs: ["create", "patch"]
-          - apiGroups: ["networking.k8s.io"]
-            resources: ["ingresses"]
-            verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-          - apiGroups: ["gateway.networking.k8s.io"]
-            resources: ["httproutes"]
-            verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    clusterRoleBindings:
+      - kube-gitops
 
   ingress:
     enabled: true
@@ -50,6 +31,29 @@ spec:
     EXTERNAL_URL: "https://gitops.centerionware.com"
 
   resources:
+    - apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: kube-gitops
+      rules:
+        - apiGroups: ["kube-gitops.centerionware.app"]
+          resources: ["gitrepos", "gitrepos/status", "prdeployments", "prdeployments/status"]
+          verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+        - apiGroups: ["kube-deploy.centerionware.app"]
+          resources: ["apps", "apps/status", "containerapps", "containerapps/status"]
+          verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+        - apiGroups: [""]
+          resources: ["secrets"]
+          verbs: ["get", "list", "watch"]
+        - apiGroups: [""]
+          resources: ["events"]
+          verbs: ["create", "patch"]
+        - apiGroups: ["networking.k8s.io"]
+          resources: ["ingresses"]
+          verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+        - apiGroups: ["gateway.networking.k8s.io"]
+          resources: ["httproutes"]
+          verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
     - apiVersion: apiextensions.k8s.io/v1
       kind: CustomResourceDefinition
@@ -82,6 +86,12 @@ spec:
               - name: ActivePRs
                 type: integer
                 jsonPath: .status.activePrDeployments
+              - name: HookStatus
+                type: string
+                jsonPath: .status.webhookStatus
+              - name: HookID
+                type: string
+                jsonPath: .status.webhookId
               - name: WebhookURL
                 type: string
                 jsonPath: .status.webhookUrl
@@ -137,27 +147,6 @@ spec:
                             type: array
                             items:
                               type: string
-                      notify:
-                        type: object
-                        properties:
-                          onDeploy:
-                            type: boolean
-                            default: true
-                          onError:
-                            type: boolean
-                            default: true
-                          onClose:
-                            type: boolean
-                            default: false
-                          deployTemplate:
-                            type: string
-                            default: "🚀 Preview deployed: {{.URL}}"
-                          errorTemplate:
-                            type: string
-                            default: "❌ Preview deployment failed: {{.Error}}"
-                          closeTemplate:
-                            type: string
-                            default: "🧹 Preview environment removed."
                       prDeploy:
                         type: object
                         properties:
@@ -250,6 +239,7 @@ spec:
                     type: object
                     x-kubernetes-preserve-unknown-fields: true
 
+    # â”€â”€ PRDeployment CRD â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     - apiVersion: apiextensions.k8s.io/v1
       kind: CustomResourceDefinition
       metadata:
