@@ -24,7 +24,7 @@ spec:
   ingress:
     enabled: true
     host: gitops.centerionware.com
-    className: nginx
+    className: cloudflare-tunnel
 
   env:
     LOG_DEV_MODE: "false"
