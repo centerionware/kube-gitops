@@ -142,6 +142,7 @@ func (r *GitRepoReconciler) reconcileWebhook(ctx context.Context, gr *api.GitRep
 		hookID, err := n.RegisterWebhook(ctx, gr.Spec.Repo, hookURL, string(secret))
 		if err != nil {
 			logger.Error(err, "failed to register webhook with platform")
+			gr.Status.WebhookStatus = "failed"
 			_ = r.setStatus(ctx, gr, "Error", fmt.Sprintf("webhook registration failed: %v", err), "")
 			return ctrl.Result{RequeueAfter: 60 * time.Second}, nil
 		}
@@ -152,9 +153,18 @@ func (r *GitRepoReconciler) reconcileWebhook(ctx context.Context, gr *api.GitRep
 			gr.Annotations = make(map[string]string)
 		}
 		gr.Annotations[annotationWebhookID] = hookID
+		gr.Status.WebhookID = hookID
+		gr.Status.WebhookStatus = "registered"
 		if err := r.Update(ctx, gr); err != nil {
 			return ctrl.Result{}, err
 		}
+	} else if existingID != "" {
+		// Already registered — mirror the ID into status in case it was lost
+		gr.Status.WebhookID = existingID
+		gr.Status.WebhookStatus = "registered"
+	} else if r.ExternalBaseURL == "" || gr.Spec.Trigger.WebhookSecret == "" {
+		// No auto-registration possible — user must register manually
+		gr.Status.WebhookStatus = "manual"
 	}
 
 	_ = r.setStatus(ctx, gr, "Ready", "webhook ready: "+hookURL, "")
@@ -177,12 +187,14 @@ func (r *GitRepoReconciler) reconcileDelete(ctx context.Context, gr *api.GitRepo
 			if err == nil {
 				if err := n.DeregisterWebhook(ctx, gr.Spec.Repo, hookID); err != nil {
 					logger.Error(err, "failed to deregister webhook from platform", "hookID", hookID)
-					// Non-fatal — continue with deletion
 				} else {
 					logger.Info("deregistered webhook from platform", "hookID", hookID)
 				}
 			}
 		}
+		// Clear status regardless of deregister outcome — the CR is being deleted
+		gr.Status.WebhookStatus = "unregistered"
+		gr.Status.WebhookID = ""
 	}
 
 	if containsString(gr.Finalizers, gitrepoFinalizer) {
@@ -256,6 +268,16 @@ func (r *GitRepoReconciler) poll(ctx context.Context, gr *api.GitRepo) error {
 			logger.Error(err, "poll: failed to create PRDeployment", "pr", pr.Number)
 		}
 		delete(existingByPR, pr.Number)
+	}
+
+	// Only delete PRDeployments for PRs no longer open.
+	// Guard: if openPRs is empty and we have existing PRDeployments, something
+	// is wrong with the API response — an empty list would wipe all previews.
+	// Skip the delete pass entirely and log a warning instead.
+	if len(openPRs) == 0 && len(existingByPR) > 0 {
+		logger.Info("poll: API returned zero open PRs but we have active PRDeployments — skipping delete pass to avoid false cleanup",
+			"activePRDeployments", len(existingByPR))
+		return nil
 	}
 
 	for _, prd := range existingByPR {
