@@ -255,7 +255,7 @@ type PRGatewayRef struct {
 // ----------------------------------------------------------------
 
 type GitRepoStatus struct {
-	// Phase: Ready, Error, Registering
+	// Phase: Ready, Error, Registering, Superseded
 	Phase string `json:"phase,omitempty"`
 
 	// Message is a human-readable status description.
