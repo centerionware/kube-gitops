@@ -1,165 +1,99 @@
-package webhook
+package platform
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 )
 
-// GitHub webhook payload structs — only the fields we care about.
-
-type githubPRPayload struct {
-	Action      string        `json:"action"`
-	Number      int           `json:"number"`
-	PullRequest githubPR      `json:"pull_request"`
-	Repository  githubRepo    `json:"repository"`
-	Sender      githubUser    `json:"sender"`
+type githubNotifier struct {
+	token string
 }
 
-type githubPR struct {
-	Number            int           `json:"number"`
-	Title             string        `json:"title"`
-	State             string        `json:"state"`
-	Head              githubRef     `json:"head"`
-	Base              githubRef     `json:"base"`
-	User              githubUser    `json:"user"`
-	AuthorAssociation string        `json:"author_association"`
-	Labels            []githubLabel `json:"labels"`
+func (g *githubNotifier) PostComment(ctx context.Context, repoURL string, prNumber int, body string) error {
+	or := orgRepo(repoURL)
+	url := fmt.Sprintf("https://api.github.com/repos/%s/issues/%d/comments", or, prNumber)
+	payload, _ := json.Marshal(map[string]string{"body": body})
+	_, err := g.do(ctx, http.MethodPost, url, payload)
+	return err
 }
 
-type githubRef struct {
-	Ref  string     `json:"ref"`
-	SHA  string     `json:"sha"`
-	Repo githubRepo `json:"repo"` // contains clone_url — critical for fork PRs
+func (g *githubNotifier) SetCommitStatus(ctx context.Context, repoURL, sha, state, description, targetURL string) error {
+	or := orgRepo(repoURL)
+	url := fmt.Sprintf("https://api.github.com/repos/%s/statuses/%s", or, sha)
+	payload, _ := json.Marshal(map[string]string{
+		"state":       state,
+		"description": description,
+		"target_url":  targetURL,
+		"context":     "kube-gitops/preview",
+	})
+	_, err := g.do(ctx, http.MethodPost, url, payload)
+	return err
 }
 
-type githubUser struct {
-	Login string `json:"login"`
-}
-
-type githubRepo struct {
-	CloneURL string `json:"clone_url"`
-}
-
-type githubLabel struct {
-	Name string `json:"name"`
-}
-
-type githubCommentPayload struct {
-	Action     string        `json:"action"`
-	Issue      githubIssue   `json:"issue"`
-	Comment    githubComment `json:"comment"`
-	Repository githubRepo    `json:"repository"`
-	// Sender is the actor who triggered the event — the commenter.
-	// author_association here is their relationship to the repo.
-	Sender     githubSender  `json:"sender"`
-}
-
-type githubSender struct {
-	Login             string `json:"login"`
-	// GitHub does not put author_association on sender — it's on the comment
-	// or issue object. Kept here for forward compatibility.
-}
-
-type githubIssue struct {
-	Number      int           `json:"number"`
-	PullRequest *struct{}     `json:"pull_request"` // non-nil = is a PR
-	// author_association on the issue reflects the ISSUE AUTHOR's association,
-	// not the commenter's. Don't use this for comment trust checks.
-	AuthorAssociation string        `json:"author_association"`
-	Labels            []githubLabel `json:"labels"`
-	Title             string        `json:"title"`
-}
-
-type githubComment struct {
-	Body string     `json:"body"`
-	User githubUser `json:"user"`
-	// author_association is the commenter's relationship to the repo.
-	// This is the authoritative field for comment trust evaluation.
-	AuthorAssociation string `json:"author_association"`
-}
-
-func parseGitHub(r *http.Request, body []byte) (PREvent, bool, error) {
-	eventType := r.Header.Get("X-GitHub-Event")
-
-	switch eventType {
-	case "pull_request":
-		return parseGitHubPR(body)
-	case "issue_comment":
-		return parseGitHubComment(body)
-	default:
-		return PREvent{}, true, nil
+func (g *githubNotifier) RegisterWebhook(ctx context.Context, repoURL, hookURL, secret string) (string, error) {
+	or := orgRepo(repoURL)
+	url := fmt.Sprintf("https://api.github.com/repos/%s/hooks", or)
+	payload, _ := json.Marshal(map[string]interface{}{
+		"name":   "web",
+		"active": true,
+		"events": []string{"pull_request", "issue_comment"},
+		"config": map[string]string{
+			"url":          hookURL,
+			"content_type": "json",
+			"secret":       secret,
+			"insecure_ssl": "0",
+		},
+	})
+	body, err := g.do(ctx, http.MethodPost, url, payload)
+	if err != nil {
+		return "", err
 	}
+	var resp struct {
+		ID int `json:"id"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return "", fmt.Errorf("parse webhook response: %w", err)
+	}
+	return fmt.Sprintf("%d", resp.ID), nil
 }
 
-func parseGitHubPR(body []byte) (PREvent, bool, error) {
-	var p githubPRPayload
-	if err := json.Unmarshal(body, &p); err != nil {
-		return PREvent{}, false, fmt.Errorf("parse github pull_request: %w", err)
+func (g *githubNotifier) DeregisterWebhook(ctx context.Context, repoURL, hookID string) error {
+	or := orgRepo(repoURL)
+	url := fmt.Sprintf("https://api.github.com/repos/%s/hooks/%s", or, hookID)
+	_, err := g.do(ctx, http.MethodDelete, url, nil)
+	return err
+}
+
+func (g *githubNotifier) do(ctx context.Context, method, url string, body []byte) ([]byte, error) {
+	var r io.Reader
+	if body != nil {
+		r = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, r)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+g.token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 
-	switch p.Action {
-	case "opened", "synchronize", "reopened", "closed", "labeled", "unlabeled":
-	default:
-		return PREvent{}, true, nil
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("github %s %s: %w", method, url, err)
 	}
-
-	labels := make([]string, len(p.PullRequest.Labels))
-	for i, l := range p.PullRequest.Labels {
-		labels[i] = l.Name
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("github %s %s: status %d: %s",
+			method, url, resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
-
-	action := p.Action
-	if action == "reopened" {
-		action = "opened"
-	}
-
-	return PREvent{
-		Action:            action,
-		PRNumber:          p.PullRequest.Number,
-		Branch:            p.PullRequest.Head.Ref,
-		HeadSHA:           p.PullRequest.Head.SHA,
-		Author:            p.PullRequest.User.Login,
-		AuthorAssociation: p.PullRequest.AuthorAssociation,
-		Title:             p.PullRequest.Title,
-		Labels:            labels,
-		// For fork PRs head.repo.clone_url is the fork — use that for the build.
-		// For same-repo PRs head.repo.clone_url == base.repo.clone_url.
-		CloneURL:          p.PullRequest.Head.Repo.CloneURL,
-	}, false, nil
-}
-
-func parseGitHubComment(body []byte) (PREvent, bool, error) {
-	var p githubCommentPayload
-	if err := json.Unmarshal(body, &p); err != nil {
-		return PREvent{}, false, fmt.Errorf("parse github issue_comment: %w", err)
-	}
-
-	// Only comments on PRs
-	if p.Issue.PullRequest == nil {
-		return PREvent{}, true, nil
-	}
-
-	// Only new comments, not edits or deletes
-	if p.Action != "created" {
-		return PREvent{}, true, nil
-	}
-
-	labels := make([]string, len(p.Issue.Labels))
-	for i, l := range p.Issue.Labels {
-		labels[i] = l.Name
-	}
-
-	commentAssociation := p.Comment.AuthorAssociation
-
-	return PREvent{
-		Action:                   "comment",
-		PRNumber:                 p.Issue.Number,
-		Title:                    p.Issue.Title,
-		Labels:                   labels,
-		CommentBody:              p.Comment.Body,
-		CommentAuthor:            p.Comment.User.Login,
-		CommentAuthorAssociation: commentAssociation,
-		// Debug: association value logged in HandleEvent
-	}, false, nil
+	return respBody, nil
 }
