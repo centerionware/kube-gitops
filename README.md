@@ -16,6 +16,8 @@ generating the right kube-deploy `App` CR, and posting status back to the PR.
 ## Project Status
 Testing phase 1:
 
+https://github.com/centerionware/kube-gitops-testing
+
 Index:
 * ⬜ - Untested
 * ✅ - Tested Working
@@ -23,12 +25,12 @@ Index:
 
 ### Github
 
-* ☑️ - Test a repo with the poll method
-  * ⬜ - Test a PR from unauthorized user from a fork
+* ✅ - Test a repo with the poll method
+  * ✅ - Test a PR from unauthorized user from a fork
   * ✅ - Test a PR from project owner from branch
-* ⬜ - Test a Repo with the webhooks method
-  * ⬜ - Test a PR from unauthorized user from a fork
-  * ⬜ - Test a PR from project owner from  
+* ☑️ - Test a Repo with the webhooks method
+  * ☑️ - Test a PR from unauthorized user from a fork
+  * ✅ - Test a PR from project owner from  
 * ⬜ - Test broken builds to see what errors are reported
   * ⬜ - Poll
   * ⬜ - Webhook
