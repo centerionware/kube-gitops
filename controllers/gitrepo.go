@@ -326,6 +326,7 @@ func (r *GitRepoReconciler) HandleEvent(ctx context.Context, gr api.GitRepo, eve
 
 	case "comment":
 		if !policy.EvaluatePR(gr.Spec.PRPolicy, event) {
+			logger.Info("comment failed trust policy", "pr", event.PRNumber, "author", event.CommentAuthor)
 			return nil
 		}
 		if event.HeadSHA == "" {
@@ -335,8 +336,10 @@ func (r *GitRepoReconciler) HandleEvent(ctx context.Context, gr api.GitRepo, eve
 			}
 			sha, branch, err := fetchPRHead(ctx, gr.Spec.Platform, gr.Spec.Repo, event.PRNumber, token)
 			if err != nil {
+				logger.Error(err, "failed to fetch PR head for comment trigger", "pr", event.PRNumber)
 				return fmt.Errorf("fetch PR head for comment trigger: %w", err)
 			}
+			logger.Info("fetched PR head for comment trigger", "pr", event.PRNumber, "branch", branch, "sha", sha)
 			event.HeadSHA = sha
 			event.Branch = branch
 		}
