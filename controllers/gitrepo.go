@@ -20,7 +20,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 const (
@@ -50,6 +52,36 @@ func SetupGitRepo(mgr ctrl.Manager, r *GitRepoReconciler) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&api.GitRepo{}).
 		Owns(&api.PRDeployment{}).
+		// Watch all GitRepo changes so when a webhook GitRepo is deleted,
+		// any superseded poll GitRepos for the same repo are immediately requeued.
+		Watches(&api.GitRepo{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []reconcile.Request {
+				changed := obj.(*api.GitRepo)
+				if changed.Spec.Trigger.Mode != "webhook" {
+					return nil
+				}
+				// Find all poll GitRepos watching the same repo and requeue them
+				var list api.GitRepoList
+				if err := mgr.GetClient().List(ctx, &list); err != nil {
+					return nil
+				}
+				var reqs []reconcile.Request
+				for _, gr := range list.Items {
+					if gr.Spec.Trigger.Mode == "poll" &&
+						gr.Spec.Platform == changed.Spec.Platform &&
+						gr.Spec.Repo == changed.Spec.Repo &&
+						gr.Name != changed.Name {
+						reqs = append(reqs, reconcile.Request{
+							NamespacedName: types.NamespacedName{
+								Name:      gr.Name,
+								Namespace: gr.Namespace,
+							},
+						})
+					}
+				}
+				return reqs
+			},
+		)).
 		Complete(r)
 }
 
@@ -81,16 +113,17 @@ func (r *GitRepoReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	// ── Poll mode ──────────────────────────────────────────────────
-	// Before polling, check if a webhook GitRepo exists for the same repo.
-	// Webhook always wins — poll backing off avoids duplicate PRDeployments
-	// and wasted API calls.
+	// Check if a webhook GitRepo exists for the same repo — webhook wins.
 	if conflict, name := r.findWebhookConflict(ctx, &gr); conflict {
 		msg := fmt.Sprintf("superseded by webhook GitRepo %q for the same repo — polling suspended", name)
 		logger.Info("poll suppressed", "reason", msg)
 		_ = r.setStatus(ctx, &gr, "Superseded", msg, "")
-		// Requeue slowly — just in case the webhook GitRepo is deleted and we
-		// need to resume. Not a tight loop.
 		return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+	}
+
+	// No conflict — if we were previously superseded, clear it and resume
+	if gr.Status.Phase == "Superseded" {
+		logger.Info("webhook GitRepo gone, resuming poll", "gitrepo", gr.Name)
 	}
 	interval := defaultPollInterval
 	if gr.Spec.Trigger.PollInterval != "" {
