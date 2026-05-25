@@ -22,8 +22,11 @@ func fetchGitHubOpenPRs(ctx context.Context, repoURL, token string) ([]openPR, e
 		Number int    `json:"number"`
 		Title  string `json:"title"`
 		Head   struct {
-			Ref string `json:"ref"`
-			SHA string `json:"sha"`
+			Ref  string `json:"ref"`
+			SHA  string `json:"sha"`
+			Repo struct {
+				CloneURL string `json:"clone_url"`
+			} `json:"repo"`
 		} `json:"head"`
 		User struct {
 			Login string `json:"login"`
@@ -49,6 +52,7 @@ func fetchGitHubOpenPRs(ctx context.Context, repoURL, token string) ([]openPR, e
 			Title:             r.Title,
 			Branch:            r.Head.Ref,
 			HeadSHA:           r.Head.SHA,
+			CloneURL:          r.Head.Repo.CloneURL,
 			Author:            r.User.Login,
 			AuthorAssociation: r.AuthorAssociation,
 			Labels:            labels,
