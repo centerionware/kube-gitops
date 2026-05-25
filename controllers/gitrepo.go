@@ -9,6 +9,7 @@ import (
 
 	api "kube-gitops/api/v1alpha1"
 	"kube-gitops/builder"
+	"kube-gitops/kubedeploy"
 	"kube-gitops/platform"
 	"kube-gitops/policy"
 	"kube-gitops/webhook"
@@ -412,8 +413,24 @@ func (r *GitRepoReconciler) createOrUpdatePRDeployment(ctx context.Context, gr *
 	if errors.IsNotFound(err) {
 		return r.createPRDeployment(ctx, gr, event)
 	}
+
+	// Update mutable fields that may have changed since creation
+	changed := false
 	if event.HeadSHA != "" && existing.Spec.HeadSHA != event.HeadSHA {
 		existing.Spec.HeadSHA = event.HeadSHA
+		changed = true
+	}
+	if event.CloneURL != "" && existing.Spec.CloneURL != event.CloneURL {
+		existing.Spec.CloneURL = event.CloneURL
+		changed = true
+		// CloneURL changed — delete the App CR so it rebuilds from the correct repo
+		if delErr := r.deleteAppCR(ctx, &existing); delErr != nil {
+			return delErr
+		}
+		// Clear the app-created annotation so pr_deployment reconciler recreates the App
+		delete(existing.Annotations, "kube-gitops.centerionware.app/app-created")
+	}
+	if changed {
 		return r.Update(ctx, &existing)
 	}
 	return nil
@@ -467,6 +484,21 @@ func (r *GitRepoReconciler) createPRDeployment(ctx context.Context, gr *api.GitR
 	}
 
 	return r.Create(ctx, prd)
+}
+
+func (r *GitRepoReconciler) deleteAppCR(ctx context.Context, prd *api.PRDeployment) error {
+	var app kubedeploy.App
+	err := r.Get(ctx, types.NamespacedName{
+		Name:      prd.Spec.AppRef,
+		Namespace: prd.Spec.AppNamespace,
+	}, &app)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	return r.Delete(ctx, &app)
 }
 
 func (r *GitRepoReconciler) deletePRDeployment(ctx context.Context, gr *api.GitRepo, prNumber int) error {
