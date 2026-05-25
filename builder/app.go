@@ -55,27 +55,27 @@ func BuildApp(gr api.GitRepo, pr api.PRDeployment) (*kubedeploy.App, error) {
 	// Build env map — PR metadata first, then static overrides
 	env := make(map[string]string)
 
+	// Resolve the correct repo URL for this PR.
+	// For fork PRs CloneURL is the fork — that's what we build from.
+	// For same-repo PRs CloneURL == RepoURL.
+	buildRepo := pr.Spec.CloneURL
+	if buildRepo == "" {
+		buildRepo = pr.Spec.RepoURL
+	}
+
 	injectPR := cfg.InjectPREnv == nil || *cfg.InjectPREnv // default true
 	if injectPR {
 		env["GITOPS_PR_NUMBER"] = strconv.Itoa(pr.Spec.PRNumber)
 		env["GITOPS_PR_BRANCH"] = pr.Spec.Branch
 		env["GITOPS_PR_SHA"] = pr.Spec.HeadSHA
 		env["GITOPS_PR_AUTHOR"] = pr.Spec.Author
-		env["GITOPS_REPO_URL"] = pr.Spec.RepoURL
+		env["GITOPS_REPO_URL"] = buildRepo       // fork URL for fork PRs
+		env["GITOPS_UPSTREAM_URL"] = pr.Spec.RepoURL // always the upstream
 	}
 
 	// Static env from GitRepo spec — these win over injected values
 	for k, v := range cfg.Env {
 		env[k] = v
-	}
-
-	// Use the head repo clone URL as spec.repo.
-	// For fork PRs this is the fork's URL — building from RepoURL (upstream)
-	// would clone main instead of the PR branch.
-	// For same-repo PRs CloneURL == RepoURL so this is always correct.
-	buildRepo := pr.Spec.CloneURL
-	if buildRepo == "" {
-		buildRepo = gr.Spec.Repo
 	}
 	if pr.Spec.Branch == "" {
 		return nil, fmt.Errorf("PRDeployment %s has empty Branch — cannot build correct commit", pr.Name)
