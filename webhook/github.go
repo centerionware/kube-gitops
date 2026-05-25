@@ -17,18 +17,20 @@ type githubPRPayload struct {
 }
 
 type githubPR struct {
-	Number            int        `json:"number"`
-	Title             string     `json:"title"`
-	State             string     `json:"state"`
-	Head              githubRef  `json:"head"`
-	User              githubUser `json:"user"`
-	AuthorAssociation string     `json:"author_association"`
+	Number            int           `json:"number"`
+	Title             string        `json:"title"`
+	State             string        `json:"state"`
+	Head              githubRef     `json:"head"`
+	Base              githubRef     `json:"base"`
+	User              githubUser    `json:"user"`
+	AuthorAssociation string        `json:"author_association"`
 	Labels            []githubLabel `json:"labels"`
 }
 
 type githubRef struct {
-	Ref string `json:"ref"` // branch name
-	SHA string `json:"sha"`
+	Ref  string     `json:"ref"`
+	SHA  string     `json:"sha"`
+	Repo githubRepo `json:"repo"` // contains clone_url — critical for fork PRs
 }
 
 type githubUser struct {
@@ -44,23 +46,36 @@ type githubLabel struct {
 }
 
 type githubCommentPayload struct {
-	Action  string       `json:"action"`
-	Issue   githubIssue  `json:"issue"`
-	Comment githubComment `json:"comment"`
-	Repository githubRepo `json:"repository"`
+	Action     string        `json:"action"`
+	Issue      githubIssue   `json:"issue"`
+	Comment    githubComment `json:"comment"`
+	Repository githubRepo    `json:"repository"`
+	// Sender is the actor who triggered the event — the commenter.
+	// author_association here is their relationship to the repo.
+	Sender     githubSender  `json:"sender"`
+}
+
+type githubSender struct {
+	Login             string `json:"login"`
+	// GitHub does not put author_association on sender — it's on the comment
+	// or issue object. Kept here for forward compatibility.
 }
 
 type githubIssue struct {
-	Number            int           `json:"number"`
-	PullRequest       *struct{}     `json:"pull_request"` // non-nil means it's a PR
+	Number      int           `json:"number"`
+	PullRequest *struct{}     `json:"pull_request"` // non-nil = is a PR
+	// author_association on the issue reflects the ISSUE AUTHOR's association,
+	// not the commenter's. Don't use this for comment trust checks.
 	AuthorAssociation string        `json:"author_association"`
 	Labels            []githubLabel `json:"labels"`
 	Title             string        `json:"title"`
 }
 
 type githubComment struct {
-	Body              string `json:"body"`
-	User              githubUser `json:"user"`
+	Body string     `json:"body"`
+	User githubUser `json:"user"`
+	// author_association is the commenter's relationship to the repo.
+	// This is the authoritative field for comment trust evaluation.
 	AuthorAssociation string `json:"author_association"`
 }
 
@@ -73,7 +88,6 @@ func parseGitHub(r *http.Request, body []byte) (PREvent, bool, error) {
 	case "issue_comment":
 		return parseGitHubComment(body)
 	default:
-		// Not a PR-related event — skip silently
 		return PREvent{}, true, nil
 	}
 }
@@ -84,7 +98,6 @@ func parseGitHubPR(body []byte) (PREvent, bool, error) {
 		return PREvent{}, false, fmt.Errorf("parse github pull_request: %w", err)
 	}
 
-	// Actions we care about
 	switch p.Action {
 	case "opened", "synchronize", "reopened", "closed", "labeled", "unlabeled":
 	default:
@@ -97,7 +110,6 @@ func parseGitHubPR(body []byte) (PREvent, bool, error) {
 	}
 
 	action := p.Action
-	// normalise "reopened" → "opened" — same handling
 	if action == "reopened" {
 		action = "opened"
 	}
@@ -111,6 +123,9 @@ func parseGitHubPR(body []byte) (PREvent, bool, error) {
 		AuthorAssociation: p.PullRequest.AuthorAssociation,
 		Title:             p.PullRequest.Title,
 		Labels:            labels,
+		// For fork PRs head.repo.clone_url is the fork — use that for the build.
+		// For same-repo PRs head.repo.clone_url == base.repo.clone_url.
+		CloneURL:          p.PullRequest.Head.Repo.CloneURL,
 	}, false, nil
 }
 
@@ -120,12 +135,12 @@ func parseGitHubComment(body []byte) (PREvent, bool, error) {
 		return PREvent{}, false, fmt.Errorf("parse github issue_comment: %w", err)
 	}
 
-	// Only care about comments on PRs (issue_comment fires on both issues and PRs)
+	// Only comments on PRs
 	if p.Issue.PullRequest == nil {
 		return PREvent{}, true, nil
 	}
 
-	// Only created comments, not edits/deletes
+	// Only new comments, not edits or deletes
 	if p.Action != "created" {
 		return PREvent{}, true, nil
 	}
@@ -135,6 +150,8 @@ func parseGitHubComment(body []byte) (PREvent, bool, error) {
 		labels[i] = l.Name
 	}
 
+	commentAssociation := p.Comment.AuthorAssociation
+
 	return PREvent{
 		Action:                   "comment",
 		PRNumber:                 p.Issue.Number,
@@ -142,9 +159,7 @@ func parseGitHubComment(body []byte) (PREvent, bool, error) {
 		Labels:                   labels,
 		CommentBody:              p.Comment.Body,
 		CommentAuthor:            p.Comment.User.Login,
-		CommentAuthorAssociation: p.Comment.AuthorAssociation,
-		// Note: issue_comment does not include head SHA or branch.
-		// The GitRepo reconciler must fetch those from the platform API
-		// if it decides to act on this comment.
+		CommentAuthorAssociation: commentAssociation,
+		// Debug: association value logged in HandleEvent
 	}, false, nil
 }
