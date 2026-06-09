@@ -1,6 +1,6 @@
 # kube-gitops
 
-Automatic PR preview deployments for Kubernetes..
+Automatic PR preview deployments for Kubernetes.
 
 When a pull request opens, kube-gitops creates a live preview environment for
 it. When the PR closes, the environment is torn down. No manual steps. No
@@ -14,7 +14,7 @@ generating the right kube-deploy `App` CR, and posting status back to the PR.
 ---
 
 ## Project Status
-Testing phase 1:
+Testing phase 2:
 
 https://github.com/centerionware/kube-gitops-testing
 
@@ -23,24 +23,49 @@ Index:
 * ✅ - Tested Working
 * ☑️ - Partially Tested
 
-### Github
+### GitHub
 
-* ✅ - Test a repo with the poll method
-  * ✅ - Test a PR from unauthorized user from a fork
-  * ✅ - Test a PR from project owner from branch
-* ☑️ - Test a Repo with the webhooks method
-  * ☑️ - Test a PR from unauthorized user from a fork
-  * ✅ - Test a PR from project owner from  
-* ⬜ - Test broken builds to see what errors are reported
+* ✅ - Poll mode
+  * ✅ - PR from unauthorized user (fork)
+  * ✅ - PR from project owner (branch)
+* ☑️ - Webhook mode
+  * ☑️ - PR from unauthorized user (fork)
+  * ✅ - PR from project owner (branch)
+* ⬜ - Broken build error reporting
   * ⬜ - Poll
   * ⬜ - Webhook
-### Gitlab
+* ⬜ - Comment trigger (`/deploy`)
+* ⬜ - `requireLabel` trust gate
 
-no testing done (yet I hope)
+### GitLab
+
+* ⬜ - Poll mode
+  * ⬜ - MR from unauthorized user
+  * ⬜ - MR from project owner
+* ⬜ - Webhook mode
+  * ⬜ - MR from unauthorized user
+  * ⬜ - MR from project owner
+* ⬜ - Broken build error reporting
 
 ### Gitea
 
-no testing done (yet I hope)
+* ⬜ - Poll mode
+  * ⬜ - PR from unauthorized user (fork)
+  * ⬜ - PR from project owner (branch)
+* ⬜ - Webhook mode
+  * ⬜ - PR from unauthorized user (fork)
+  * ⬜ - PR from project owner (branch)
+* ⬜ - Broken build error reporting
+
+### Forgejo
+
+* ⬜ - Poll mode
+  * ⬜ - PR from unauthorized user (fork)
+  * ⬜ - PR from project owner (branch)
+* ⬜ - Webhook mode
+  * ⬜ - PR from unauthorized user (fork)
+  * ⬜ - PR from project owner (branch)
+* ⬜ - Broken build error reporting
 
 ---
 
@@ -92,7 +117,7 @@ metadata:
   name: myapp
   namespace: kube-deploy
 spec:
-  platform: github
+  platform: github          # github | gitlab | gitea | forgejo
   repo: https://github.com/myorg/myapp
   gitSecret: myapp-git-secret
   trigger:
